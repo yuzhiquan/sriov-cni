@@ -1,0 +1,19 @@
+# 编译产物
+build/
+/dist/
+/sriov
+/sriov-cni
+
+# Go
+*.test
+*.out
+coverage.txt
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# 运行时日志
+*.log

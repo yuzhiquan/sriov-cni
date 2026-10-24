@@ -1,0 +1,511 @@
+# 04 · 实操：Pod 第二块网卡与第二个 IP
+
+# 04 · 实操：让 Pod 拥有第二块网卡和第二个 IP
+
+## 目标
+
+```bash
+$ kubectl exec -it test-sriov -- ip -br addr
+lo               UNKNOWN        127.0.0.1/8
+eth0@if23        UP             10.244.1.5/24        # ← 主网卡，Calico，overlay
+net1             UP             192.168.100.10/24    # ← 第二块网卡，SR-IOV VF，underlay 直通
+```
+
+---
+
+## 阶段 1：节点准备（每个节点做一次）
+
+### 1.1 BIOS
+
+| 选项 | 值 |
+| --- | --- |
+| `SR-IOV Support` | Enabled |
+| `VT-d` / `AMD IOMMU` | Enabled |
+| `Above 4G Decoding` | **Enabled**（大 BAR 必需，忘了会开不出 VF） |
+| `PCIe ACS` | Enabled（若选项存在，影响 IOMMU 分组隔离） |
+
+### 1.2 内核参数
+
+```bash
+# /etc/default/grub
+GRUB_CMDLINE_LINUX_DEFAULT="... intel_iommu=on iommu=pt"
+# AMD 用 amd_iommu=on iommu=pt
+# 注意：仅 netdevice 模式其实不需要 IOMMU，但开上无害且为 DPDK 留后路
+
+sudo update-grub && sudo reboot
+```
+
+验证：
+
+```bash
+dmesg | grep -i -E "DMAR: Intel-IOMMU enabled|AMD-Vi"
+```
+
+### 1.3 确认网卡支持 SR-IOV
+
+```bash
+$ lspci -vvv -s 03:00.0 | grep -i -A3 "single root"
+	Capabilities: [180 v1] Single Root I/O Virtualization (SR-IOV)
+		IOVCap:	Migration-, Interrupt Message Number: 000
+		IOVCtl:	Enable+ Migration- Interrupt- MSE+ ARIHierarchy+
+		IOVSta:	Migration-
+```
+
+### 1.4 创建 VF
+
+```bash
+PF=ens1f0
+echo 8 | sudo tee /sys/class/net/$PF/device/sriov_numvfs
+
+$ ip link show $PF
+5: ens1f0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 ...
+    vf 0     MAC 00:00:00:00:00:00, spoof checking on, link-state auto, trust off
+    vf 1     MAC 00:00:00:00:00:00, spoof checking on, link-state auto, trust off
+    ...
+```
+
+### 1.5 VF 持久化
+
+重启后 `sriov_numvfs` 会归零。任选一种：
+
+```bash
+# 方案 A：systemd unit（通用）
+cat <<'EOF' | sudo tee /etc/systemd/system/sriov-vfs.service
+[Unit]
+Description=Create SR-IOV VFs for ens1f0
+After=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'echo 8 > /sys/class/net/ens1f0/device/sriov_numvfs'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl enable --now sriov-vfs
+```
+
+```bash
+# 方案 B：NetworkManager keyfile
+nmcli connection modify ens1f0 sriov.total-vfs 8
+nmcli connection up ens1f0
+```
+
+### 1.6 ⚠️ 防止被网络管理工具抢走
+
+**这是生产环境最常见的故障源**：NetworkManager / netplan 会把 VF netdev 当普通网卡管起来，导致 CNI 搬不动。
+
+```bash
+# NetworkManager：把 VF 标记为 unmanaged
+cat <<'EOF' | sudo tee /etc/NetworkManager/conf.d/10-sriov-vf-unmanaged.conf
+[keyfile]
+unmanaged-devices=interface-name:ens1f0v*;interface-name:ens1f1v*
+EOF
+sudo systemctl reload NetworkManager
+
+# 确认
+nmcli device status | grep ens1f0v
+# ens1f0v0   unmanaged  --
+```
+
+也可以用仓库里的脚本：
+
+```bash
+sudo ./deploy/setup-vfs.sh --pf ens1f0 --numvfs 8
+```
+
+---
+
+## 阶段 2：集群组件
+
+### 2.1 Multus
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/master/deployments/multus-daemonset-thick.yml
+```
+
+验证：
+
+```bash
+kubectl -n kube-system get pods -l app=multus
+ls /opt/cni/bin/multus /opt/cni/bin/multus-shim
+```
+
+### 2.2 SR-IOV Device Plugin
+
+ConfigMap（本仓库 [deploy/01-device-plugin-cm.yaml](../deploy/01-device-plugin-cm.yaml) · [deploy/02-nad-sriov-vlan1000.yaml](../deploy/02-nad-sriov-vlan1000.yaml) · [deploy/03-pod-dual-nic.yaml](../deploy/03-pod-dual-nic.yaml)）：
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sriovdp-config
+  namespace: kube-system
+data:
+  config.json: |
+    {
+      "resourceList": [
+        {
+          "resourcePrefix": "intel.com",
+          "resourceName": "intel_sriov_netdevice",
+          "deviceType": "netdevice",
+          "selectors": {
+            "vendors": ["8086"],
+            "devices": ["1889"],
+            "drivers": ["iavf"],
+            "pfNames": ["ens1f0"]
+          }
+        },
+        {
+          "resourcePrefix": "intel.com",
+          "resourceName": "intel_sriov_dpdk",
+          "deviceType": "vfio",
+          "selectors": {
+            "vendors": ["8086"],
+            "devices": ["1889"],
+            "drivers": ["vfio-pci"],
+            "pfNames": ["ens1f1"]
+          }
+        }
+      ]
+    }
+```
+
+> 资源全名 = `<resourcePrefix>/<resourceName>`，默认前缀是 `intel.com`。
+> Mellanox 卡常用 `mellanox.com` + `mlnx_sriov_netdevice`。
+
+DaemonSet 用官方 manifest：
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/k8snetworkplumbingwg/sriov-network-device-plugin/master/deployments/k8s-v1.16/sriovdp-daemonset.yaml
+```
+
+### 2.3 放好 sriov-cni 二进制
+
+每个节点：
+
+```bash
+sudo cp /tmp/sriov /opt/cni/bin/sriov && sudo chmod +x /opt/cni/bin/sriov
+```
+
+### 2.4 IPAM（whereabouts）
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/k8snetworkplumbingwg/whereabouts/master/doc/crds/daemonset-install.yaml
+kubectl apply -f https://raw.githubusercontent.com/k8snetworkplumbingwg/whereabouts/master/doc/crds/whereabouts.cni.cncf.io_ippools.yaml
+kubectl apply -f https://raw.githubusercontent.com/k8snetworkplumbingwg/whereabouts/master/doc/crds/whereabouts.cni.cncf.io_overlappingrangeipreservations.yaml
+```
+
+### 2.5 确认资源已上报
+
+```bash
+$ kubectl get node worker-1 -o jsonpath='{.status.allocatable}' | jq
+{
+  "cpu": "48",
+  "intel.com/intel_sriov_netdevice": "8",     # ← 看到了
+  "memory": "256Gi",
+  "pods": "110"
+}
+```
+
+---
+
+## 阶段 3：定义第二张网络（NetworkAttachmentDefinition）
+
+[deploy/02-nad-sriov-vlan1000.yaml](../deploy/02-nad-sriov-vlan1000.yaml)
+
+```yaml
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: sriov-vlan1000
+  namespace: default
+  annotations:
+    # ★ 关键：告诉 Multus 这个网络需要哪种扩展资源，
+    #   Multus 会据此去 PodResources API 取已分配的 deviceID
+    k8s.v1.cni.cncf.io/resourceName: intel.com/intel_sriov_netdevice
+spec:
+  config: |
+    {
+      "cniVersion": "0.3.1",
+      "type": "sriov",
+      "vlan": 1000,
+      "spoofchk": "off",
+      "trust": "on",
+      "link_state": "enable",
+      "ipam": {
+        "type": "whereabouts",
+        "range": "192.168.100.0/24",
+        "range_start": "192.168.100.10",
+        "range_end": "192.168.100.200",
+        "gateway": "192.168.100.1",
+        "routes": [
+          { "dst": "192.168.100.0/24" }
+        ]
+      }
+    }
+```
+
+字段解释：
+
+| 字段 | 作用 |
+| --- | --- |
+| `type: sriov` | 调用 `/opt/cni/bin/sriov` |
+| `deviceID` | **不写** —— 由 Multus 注入（写了会被覆盖，仅测试用） |
+| `vlan` | 硬件打 tag，Pod 里是 untagged |
+| `spoofchk: off` | 允许 CNI 改 MAC |
+| `trust: on` | 允许 VF 改 MAC / 混杂模式 |
+| `ipam.gateway` | 若为 `""` 则不添加默认路由（多网卡更安全，见下） |
+
+---
+
+## 阶段 4：★ 关键 —— 默认路由冲突
+
+这是"Pod 双网卡"最容易翻车的地方。
+
+### 问题
+
+```bash
+# Pod 里
+$ ip route
+default via 169.254.1.1 dev eth0      # Calico 的默认路由
+default via 192.168.100.1 dev net1    # IPAM 又加了一条 ← 冲突！
+```
+
+两条默认路由 → 出网走哪条取决于 metric，结果**不可预测**。常见症状：
+
+- 访问 Service / DNS 时断时续
+- `net1` 出去的包回不来（非对称路由）
+- 业务绑了 net1 的 IP 却走 eth0 出去，被对端拒绝
+
+### 三种解法
+
+**解法 1：不给 net1 配网关（最简单）**
+
+```json
+"ipam": {
+  "type": "whereabouts",
+  "range": "192.168.100.0/24",
+  "gateway": ""          // 留空 → 不加默认路由
+}
+```
+
+- 只有 `192.168.100.0/24` 的链路路由
+- 跨网段访问要在 Pod 里手动加路由，或让应用**显式绑定网卡**
+- **适合**：NFV、5G UPF、数据库、RDMA 这类"专用数据面"场景
+
+**解法 2：策略路由（推荐，本插件原生支持）**
+
+```json
+"ipam": {
+  "type": "whereabouts",
+  "range": "192.168.100.0/24",
+  "gateway": "192.168.100.1",
+  "routes": [
+    { "dst": "0.0.0.0/0", "gw": "192.168.100.1", "table": 100 }
+  ]
+}
+```
+
+插件会**自动**额外下发：
+
+```bash
+ip rule add from 192.168.100.10/32 table 100 pref 1100
+```
+
+效果：
+
+- 默认出网仍走 `eth0`（集群网络正常）
+- **源地址是 192.168.100.10 的流量**走 `net1`
+- 应用只需 `bind(192.168.100.10)` 即可自动走第二张网卡
+
+**解法 3：initContainer 手工配置（兜底）**
+
+需要 `NET_ADMIN` capability：
+
+```yaml
+initContainers:
+- name: net1-routes
+  image: alpine
+  securityContext:
+    capabilities:
+      add: ["NET_ADMIN"]
+  command:
+  - sh
+  - -c
+  - |
+    IP=$(ip -4 -o addr show net1 | awk '{print $4}' | cut -d/ -f1)
+    ip route add 192.168.100.0/24 dev net1 src $IP table 100
+    ip route add default via 192.168.100.1 dev net1 table 100
+    ip rule add from $IP/32 table 100 pref 1100
+```
+
+---
+
+## 阶段 5：创建 Pod
+
+[deploy/03-pod-dual-nic.yaml](../deploy/03-pod-dual-nic.yaml)
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-sriov
+  namespace: default
+  annotations:
+    k8s.v1.cni.cncf.io/networks: |
+      [{"name":"sriov-vlan1000","namespace":"default","interface":"net1"}]
+spec:
+  containers:
+  - name: app
+    image: alpine:3.19
+    command: ["sleep","infinity"]
+    resources:
+      requests:
+        intel.com/intel_sriov_netdevice: 1
+      limits:
+        intel.com/intel_sriov_netdevice: 1     # ★ 必须声明，且名字要和 NAD 注解一致
+```
+
+> **三个必须对齐的名字**：
+>
+> 1. Device Plugin ConfigMap 里的 `resourcePrefix` + `resourceName`
+> 2. NAD 注解 `k8s.v1.cni.cncf.io/resourceName`
+> 3. Pod 的 `resources.limits`
+>
+> 任何一个不一致 → 要么调度失败，要么 deviceID 拿不到 → CNI ADD 报错。
+
+---
+
+## 阶段 6：验证
+
+### 6.1 看网卡
+
+```bash
+$ kubectl exec -it test-sriov -- ip -br link
+lo               UNKNOWN        00:00:00:00:00:00 <LOOPBACK,UP,LOWER_UP>
+eth0@if23        UP             6a:8b:2c:...      <BROADCAST,MULTICAST,UP,LOWER_UP>
+net1             UP             02:11:22:33:44:55 <BROADCAST,MULTICAST,UP,LOWER_UP>
+```
+
+### 6.2 看 IP
+
+```bash
+$ kubectl exec -it test-sriov -- ip -br addr show net1
+net1             UP             192.168.100.10/24
+```
+
+### 6.3 确认是 SR-IOV VF（不是普通虚拟网卡）
+
+```bash
+$ kubectl exec -it test-sriov -- sh -c 'ethtool -i net1'
+driver: iavf                       # ← Intel Adaptive VF
+version: 4.9.x
+bus-info: 0000:03:02.1             # ← 真实 PCI 地址
+```
+
+```bash
+# 还可以看到 VF 的 PCI 拓扑
+$ kubectl exec -it test-sriov -- sh -c 'ls /sys/class/net/net1/device/'
+iommu_group  physfn  sriov_vf_device  ...
+```
+
+### 6.4 看注解里写入的网络状态
+
+```bash
+$ kubectl get pod test-sriov -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/networks-status}' | jq
+[
+  {
+    "name": "k8s-pod-network",
+    "interface": "eth0",
+    "ips": ["10.244.1.5"],
+    "default": true
+  },
+  {
+    "name": "default/sriov-vlan1000",
+    "interface": "net1",
+    "ips": ["192.168.100.10"],
+    "device-info": {
+      "type": "pci",
+      "version": "1.0.0",
+      "pci": { "pci-address": "0000:03:02.1" }
+    }
+  }
+]
+```
+
+### 6.5 验证策略路由
+
+```bash
+$ kubectl exec -it test-sriov -- ip rule
+0:	from all lookup local
+1100:	from 192.168.100.10 lookup 100       # ← 自动下发的
+32766:	from all lookup main
+32767:	from all lookup default
+
+$ kubectl exec -it test-sriov -- ip route show table 100
+default via 192.168.100.1 dev net1
+```
+
+### 6.6 连通性测试
+
+```bash
+# 指定源地址 ping
+$ kubectl exec -it test-sriov -- ping -I 192.168.100.10 -c 3 192.168.100.1
+PING 192.168.100.1 (192.168.100.1): 56 data bytes
+64 bytes from 192.168.100.1: seq=0 ttl=64 time=0.18 ms
+
+# 确认走的是 net1
+$ kubectl exec -it test-sriov -- ip route get 192.168.100.1 from 192.168.100.10
+192.168.100.1 from 192.168.100.10 dev net1 table 100 uid 0
+```
+
+### 6.7 宿主机侧确认 VF 已被占用
+
+```bash
+$ ip link show ens1f0
+5: ens1f0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 ...
+    vf 0     MAC 02:11:22:33:44:55, vlan 1000, spoof checking off, link-state enable, trust on
+    vf 1     MAC 00:00:00:00:00:00, spoof checking on, link-state auto, trust off
+```
+
+`vf 0` 带上了我们配置的 MAC + VLAN，说明生效了。
+
+---
+
+## 阶段 7：让应用真正使用第二个 IP
+
+拿到网卡只是第一步，还要让流量走对：
+
+| 层级 | 做法 |
+| --- | --- |
+| **socket 绑定** | `bind(192.168.100.10)` + 本插件的策略路由 → 自动走 net1 |
+| **强制绑设备** | `setsockopt(SOL_SOCKET, SO_BINDTODEVICE, "net1")` |
+| **HTTP/客户端** | 指定 `local_address` / `source_address` |
+| **curl** | `curl --interface 192.168.100.10 http://...` |
+| **Go** | `net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP("192.168.100.10")}}` |
+| **整容器隔离** | Network namespace / VRF |
+
+### 必配内核参数
+
+多网卡 + 非对称路由时，反向路径过滤会**静默丢包**：
+
+```bash
+# /etc/sysctl.d/99-sriov-multinic.conf
+net.ipv4.conf.all.rp_filter=2        # 2 = loose 模式（推荐）；0 = 关闭
+net.ipv4.conf.default.rp_filter=2
+net.ipv4.conf.all.arp_filter=1       # 防 ARP flux
+net.ipv4.conf.all.arp_announce=2
+net.ipv4.conf.all.arp_ignore=1
+```
+
+```bash
+sudo sysctl --system
+```
+
+> `rp_filter=1`（严格模式）是多网卡场景的头号杀手：回包从另一张网卡进来时，内核直接丢弃，且**没有任何日志**。
+
+---
+
+**上一篇**：[03 · 手写 SR-IOV CNI](./03-编写SRIOV-CNI.md) · **下一篇**：[05 · 排错与性能优化](./05-排错与优化.md)
