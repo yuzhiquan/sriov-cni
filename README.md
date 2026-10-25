@@ -50,7 +50,7 @@ A NAD defines the second network, the Pod annotation `k8s.v1.cni.cncf.io/network
 ## Build
 
 ```bash
-cd sriov-cni-guide
+cd sriov-cni
 ./build.sh
 # or
 make all
