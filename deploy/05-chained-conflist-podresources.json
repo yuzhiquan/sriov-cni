@@ -1,0 +1,54 @@
+{
+  "_comment": "chained 模式 + podresources：主 CNI(calico) 之后链式调用 sriov。放到 /etc/cni/net.d/10-calico-sriov.conflist（先删除原来的 10-calico.conflist，避免重复）。VF 由 Device Plugin 分配，本插件向 kubelet 查询。",
+  "name": "k8s-pod-network",
+  "cniVersion": "1.0.0",
+  "plugins": [
+    {
+      "type": "calico",
+      "log_level": "info",
+      "datastore_type": "kubernetes",
+      "ipam": { "type": "calico-ipam" },
+      "policy": { "type": "k8s" },
+      "kubernetes": { "kubeconfig": "/etc/cni/net.d/calico-kubeconfig" }
+    },
+    {
+      "type": "sriov",
+      "mode": "chained",
+      "vfAllocator": "podresources",
+      "secondaryIfName": "net1",
+      "annotation": "sriov.example.com/network",
+      "logLevel": "info",
+      "logFile": "/var/log/sriov-cni.log",
+
+      "kubernetes": {
+        "apiServer": "https://10.96.0.1:443",
+        "tokenFile": "/etc/cni/net.d/sriov.d/token",
+        "caFile": "/etc/cni/net.d/sriov.d/ca.crt"
+      },
+      "podResources": {
+        "socket": "/var/lib/kubelet/pod-resources/kubelet.sock",
+        "resource": "intel.com/intel_sriov_netdevice"
+      },
+
+      "networks": {
+        "vlan1000": {
+          "vlan": 1000,
+          "spoofchk": "off",
+          "trust": "on",
+          "ipam": {
+            "type": "whereabouts",
+            "range": "192.168.100.0/24",
+            "routes": [
+              { "dst": "192.168.100.0/24" },
+              { "dst": "0.0.0.0/0", "gw": "192.168.100.1", "table": 100 }
+            ]
+          }
+        },
+        "vlan2000": {
+          "vlan": 2000,
+          "ipam": { "type": "host-local", "subnet": "192.168.200.0/24" }
+        }
+      }
+    }
+  ]
+}

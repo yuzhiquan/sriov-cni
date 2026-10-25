@@ -1,0 +1,68 @@
+# chained 模式下的双网卡 Pod：只需要一个注解，不需要 Multus / NAD。
+#
+#   eth0 : 主 CNI(calico) 分配
+#   net1 : sriov 链式插件按注解值 "vlan1000" 在 conflist 的 networks 里查到配置后创建
+#
+# 变体 A（vfAllocator=podresources）：必须声明 resources.limits，调度器和 Device Plugin 才会分配 VF。
+# 变体 B（vfAllocator=pool）：不需要 resources，VF 由 CNI 从节点本地池里分配。
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-chained-podresources
+  namespace: default
+  labels:
+    app: test-chained
+    version: v1
+    component: demo
+  annotations:
+    sriov.example.com/network: vlan1000
+spec:
+  containers:
+  - name: app
+    image: alpine:3.19
+    command: ["sleep", "infinity"]
+    resources:
+      requests:
+        cpu: 100m
+        memory: 64Mi
+        intel.com/intel_sriov_netdevice: 1
+      limits:
+        cpu: 200m
+        memory: 128Mi
+        intel.com/intel_sriov_netdevice: 1
+    volumeMounts:
+    - name: share
+      mountPath: /shared
+  volumes:
+  - name: share
+    emptyDir: {}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-chained-pool
+  namespace: default
+  labels:
+    app: test-chained
+    version: v1
+    component: demo
+  annotations:
+    sriov.example.com/network: vlan1000
+spec:
+  containers:
+  - name: app
+    image: alpine:3.19
+    command: ["sleep", "infinity"]
+    resources:
+      requests:
+        cpu: 100m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 128Mi
+    volumeMounts:
+    - name: share
+      mountPath: /shared
+  volumes:
+  - name: share
+    emptyDir: {}

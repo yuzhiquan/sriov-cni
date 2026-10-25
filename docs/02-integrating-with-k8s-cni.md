@@ -255,3 +255,5 @@ echo 8 > /sys/class/net/ens1f0/device/sriov_numvfs   # and make it persistent
 ---
 
 **Previous**: [01 · SR-IOV Principles](./01-sriov-principles.md) · **Next**: [03 · Writing an SR-IOV CNI from Scratch](./03-writing-a-sriov-cni.md)
+
+> **Without Multus?** The plugin can also run as a chained plugin and pick its VF itself: see [08 · Running Without Multus](./08-running-without-multus.md).

@@ -255,3 +255,5 @@ echo 8 > /sys/class/net/ens1f0/device/sriov_numvfs   # 并做持久化
 ---
 
 **上一篇**：[01 · SR-IOV 原理](./01-SRIOV原理.md) · **下一篇**：[03 · 手写一个 SR-IOV CNI](./03-编写SRIOV-CNI.md)
+
+> **不想用 Multus？** 本插件也可以作为链式插件运行并自己选 VF：见 [08 · 不依赖 Multus](./08-不依赖Multus.md)。

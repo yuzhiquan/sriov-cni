@@ -12,7 +12,48 @@ import (
 	"strings"
 
 	"github.com/containernetworking/cni/pkg/types"
+	"github.com/containernetworking/cni/pkg/version"
+
+	"github.com/example/sriov-cni/pkg/k8s"
+	"github.com/example/sriov-cni/pkg/pool"
 )
+
+// 运行模式（Mode）。
+const (
+	// ModeMultus（默认）：由 Multus 按 NAD 调用本插件，本插件只负责这一块 VF。
+	ModeMultus = "multus"
+	// ModeChained：本插件作为 conflist 里主 CNI 之后的链式插件，
+	// 自己读 Pod 注解决定要不要、挂哪个副网卡，不依赖 Multus。
+	ModeChained = "chained"
+)
+
+// VF 来源（VFAllocator）：决定"这个 Pod 用哪块 VF"由谁说了算。
+const (
+	// AllocInjected（默认）：deviceID 由配置 / Multus / 环境变量给出。
+	AllocInjected = "injected"
+	// AllocPodResources：向 kubelet PodResources API 查 Device Plugin 的分配结果。
+	AllocPodResources = "podresources"
+	// AllocPool：用节点本地 VF 池自行分配，不需要 Device Plugin。
+	AllocPool = "pool"
+)
+
+// DefaultSecondaryIfName 是 chained 模式下副网卡在 Pod 内的默认名字。
+const DefaultSecondaryIfName = "net1"
+
+// DefaultAnnotation 是 chained 模式下用来选择网络的 Pod 注解。
+const DefaultAnnotation = "sriov.example.com/network"
+
+// PodResourcesConf 配置 VF 来源 podresources。
+type PodResourcesConf struct {
+	// Socket 默认 /var/lib/kubelet/pod-resources/kubelet.sock。
+	Socket string `json:"socket"`
+	// Resource 是 Device Plugin 的资源名，如 intel.com/intel_sriov_netdevice。
+	Resource string `json:"resource"`
+	// Index 当 Pod 在该资源下有多块设备时，取第几块（默认 0）。
+	Index int `json:"index"`
+	// TimeoutMs 等待分配结果出现的最长时间，默认 3000。
+	TimeoutMs int `json:"timeoutMs"`
+}
 
 // NetConf 是 sriov-cni 的完整配置结构。
 //
@@ -61,6 +102,29 @@ type NetConf struct {
 	// MTU 可选；0 表示沿用 VF netdev 当前 MTU。
 	MTU int `json:"mtu"`
 
+	// ---------- 无 Multus 方案：模式与 VF 来源 ----------
+
+	// Mode: "multus"（默认）| "chained"。见 ModeChained。
+	Mode string `json:"mode"`
+	// VFAllocator: "injected"（默认）| "podresources" | "pool"。
+	// 两种模式都可以搭配任何一种来源。
+	VFAllocator string `json:"vfAllocator"`
+	// PodResources / Pool 是对应来源的参数。
+	PodResources *PodResourcesConf `json:"podResources,omitempty"`
+	Pool         *pool.Conf        `json:"pool,omitempty"`
+
+	// 以下仅 chained 模式使用。
+
+	// Kubernetes 描述如何访问 API server 读取 Pod 注解。
+	Kubernetes *k8s.Conf `json:"kubernetes,omitempty"`
+	// Annotation 是选择网络的 Pod 注解键，默认 DefaultAnnotation。
+	Annotation string `json:"annotation,omitempty"`
+	// Networks 是"网络名 -> 覆盖配置"，注解的值用来在这里查表。
+	// 覆盖配置的任意顶层字段（vlan、ipam、resource…）会盖掉基础配置。
+	Networks map[string]json.RawMessage `json:"networks,omitempty"`
+	// SecondaryIfName 是副网卡在 Pod 内的名字，默认 net1。
+	SecondaryIfName string `json:"secondaryIfName,omitempty"`
+
 	// ---------- 运行时注入 ----------
 
 	// RuntimeConfig 是 Multus 注入设备信息的另一种位置
@@ -83,6 +147,9 @@ type NetConf struct {
 	Netdev      string      `json:"netdev,omitempty"`
 	PFBDF       string      `json:"pfBDF,omitempty"`
 	Extra       interface{} `json:"-"`
+	// StdinData 缓存 ADD 时实际传给 IPAM 的配置（chained 模式合并后的版本），
+	// DEL 时 runtime 给的是未合并的 conflist，需要它才能正确归还 IP。
+	StdinData json.RawMessage `json:"stdinData,omitempty"`
 }
 
 // VfState 记录 VF 被 CNI 接管之前的硬件属性，DEL 时用于还原。
@@ -132,11 +199,55 @@ func LoadConf(data []byte) (*NetConf, error) {
 		n.DeviceID = deviceIDFromEnv()
 	}
 
+	// chained 模式需要 prevResult（主 CNI 的结果）。
+	if n.Mode == ModeChained && n.RawPrevResult != nil {
+		if err := version.ParsePrevResult(&n.NetConf); err != nil {
+			return nil, fmt.Errorf("sriov: invalid prevResult: %v", err)
+		}
+	}
+
+	switch n.Mode {
+	case "", ModeMultus, ModeChained:
+	default:
+		return nil, fmt.Errorf("sriov: invalid mode %q, expect multus|chained", n.Mode)
+	}
+	switch n.VFAllocator {
+	case "", AllocInjected, AllocPodResources, AllocPool:
+	default:
+		return nil, fmt.Errorf("sriov: invalid vfAllocator %q, expect injected|podresources|pool", n.VFAllocator)
+	}
+
 	return n, n.validate()
 }
 
+// Validate 在 deviceID 被 podresources/pool 解析出来之后重新校验。
+func (n *NetConf) Validate() error { return n.validate() }
+
+// DeferDevice 表示此刻还没有 deviceID 是正常的：
+// 要么稍后由 podresources/pool 解析，要么 chained 外壳要等合并网络配置后才知道。
+func (n *NetConf) DeferDevice() bool {
+	return n.Mode == ModeChained ||
+		n.VFAllocator == AllocPodResources || n.VFAllocator == AllocPool
+}
+
+// SecondaryIfNameOrDefault 返回 chained 模式下副网卡的名字。
+func (n *NetConf) SecondaryIfNameOrDefault() string {
+	if n.SecondaryIfName != "" {
+		return n.SecondaryIfName
+	}
+	return DefaultSecondaryIfName
+}
+
+// AnnotationOrDefault 返回选择网络的注解键。
+func (n *NetConf) AnnotationOrDefault() string {
+	if n.Annotation != "" {
+		return n.Annotation
+	}
+	return DefaultAnnotation
+}
+
 func (n *NetConf) validate() error {
-	if n.DeviceID == "" && (n.PFName == "" || n.VFID < 0) {
+	if n.DeviceID == "" && !n.DeferDevice() && (n.PFName == "" || n.VFID < 0) {
 		return fmt.Errorf(`sriov: missing "deviceID" (or "pfName"+"vfID"); ` +
 			`it is normally injected by Multus from the SR-IOV Device Plugin`)
 	}

@@ -15,6 +15,9 @@
 | **[03 · 手写 SR-IOV CNI](./docs/03-编写SRIOV-CNI.md)** | 逐行讲解代码实现：sysfs 拓扑发现、netlink 硬件属性下发、netns 搬运、IPAM delegate、DEL 还原 |
 | **[04 · 实操：第二块网卡](./docs/04-实操-第二块网卡.md)** | 节点准备 → 集群组件 → NAD → Pod → 验证，**含默认路由冲突的三种解法** |
 | **[05 · 排错与优化](./docs/05-排错与优化.md)** | 故障对照表、诊断命令集、NUMA/中断/大页调优、生产清单 |
+| **[06 · 与 macvlan/ipvlan 对比](./docs/06-与macvlan-ipvlan对比.md)** | 数据面路径对比、MAC 处理方式、云环境兼容性、选型决策树 |
+| **[07 · VF 间隔离与带宽](./docs/07-VF间隔离与带宽.md)** | 大流量下 VF 是否互相影响、带宽是否被切分、TX/RX 限速能力、厂商对比 |
+| **[08 · 不依赖 Multus](./docs/08-不依赖Multus.md)** | `chained` 模式（按注解挂第二块网卡）、`podresources` / `pool` 两种 VF 来源、取舍 |
 
 **代码**
 
@@ -24,6 +27,10 @@ pkg/config/           配置解析、校验、状态缓存
 pkg/sriov/            ★ VF 拓扑发现 + 硬件属性下发 + netns 搬运
 pkg/ipam/             IPAM delegate + 地址/路由/策略路由下发
 pkg/ns/               netns 进出封装（锁线程）
+pkg/chain/            chained 模式：配置合并 + 追加到 prevResult
+pkg/k8s/              chained 模式：从 API server 读 Pod 注解
+pkg/podresources/     VF 来源 podresources：向 kubelet 查 Pod 分到的设备
+pkg/pool/             VF 来源 pool：节点本地 VF 分配器（flock + 状态文件）
 ```
 
 ---
@@ -69,7 +76,9 @@ export GOPROXY=https://goproxy.cn,direct   # 国内
 | `github.com/containernetworking/cni` | v1.2.3 |
 | `github.com/vishvananda/netlink` | v1.2.1 |
 | `github.com/vishvananda/netns` | v0.0.4 |
-| `golang.org/x/sys` | v0.17.0 |
+| `golang.org/x/sys` | v0.20.0 |
+| `google.golang.org/grpc` | v1.51.0 |
+| `k8s.io/kubelet` | v0.27.4 |
 
 ---
 
@@ -155,7 +164,30 @@ echo '{"cniVersion":"1.0.0","name":"n","type":"sriov","ipam":{}}' \
 | `dpdk` | `false` | true 时跳过 netns 搬运 |
 | `resetOnDel` | `true` | DEL 时是否还原 VF |
 
-`deviceID` 的三种来源（按优先级）：顶层 `deviceID` → `runtimeConfig.deviceID` → 环境变量 `PCIDEVICE_*`。
+`deviceID` 的三种静态来源（按优先级）：顶层 `deviceID` → `runtimeConfig.deviceID` → 环境变量 `PCIDEVICE_*`。都没有时由 `vfAllocator` 决定（见下）。
+
+### 不依赖 Multus（可选）
+
+两个相互独立的开关，默认值保持上面基于 Multus 的行为。详见 [第 08 篇](./docs/08-不依赖Multus.md)。
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `mode` | `multus` | `chained`：作为 conflist 里主 CNI 之后的一环，读 Pod 注解，挂 `secondaryIfName`（默认 `net1`）；没有注解的 Pod 原样透传 |
+| `vfAllocator` | `injected` | `podresources`：向 kubelet 查 Device Plugin 分配的 VF。`pool`：从节点本地池里分配，不需要 Device Plugin（调度器看不到） |
+| `annotation` | `sriov.example.com/network` | （chained）Pod 注解键，值对应 `networks` 里的一项 |
+| `networks` | — | （chained）`网络名 → 覆盖配置`；顶层键覆盖基础配置，`ipam` 整体替换 |
+| `kubernetes` | — | （chained）读取 Pod 用的 `apiServer`、`tokenFile`、`caFile`、`timeoutMs` |
+| `podResources` | — | （`podresources`）`resource`（必填）、`socket`、`index`、`timeoutMs` |
+| `pool` | — | （`pool`）`pfNames` 和/或 `devices`、`stateDir` |
+
+```json
+{ "type": "sriov", "mode": "chained", "vfAllocator": "podresources",
+  "kubernetes": { "apiServer": "https://10.96.0.1:443", "tokenFile": "/etc/cni/net.d/sriov.d/token", "caFile": "/etc/cni/net.d/sriov.d/ca.crt" },
+  "podResources": { "resource": "intel.com/intel_sriov_netdevice" },
+  "networks": { "vlan1000": { "vlan": 1000, "ipam": { "type": "whereabouts", "range": "192.168.100.0/24" } } } }
+```
+
+Pod 这时只需要 `metadata.annotations: { sriov.example.com/network: vlan1000 }`。
 
 ---
 
@@ -168,6 +200,10 @@ echo '{"cniVersion":"1.0.0","name":"n","type":"sriov","ipam":{}}' \
 | [`deploy/02-nad-sriov-vlan1000.yaml`](../deploy/02-nad-sriov-vlan1000.yaml) | NetworkAttachmentDefinition（whereabouts / 策略路由两个变体） |
 | [`deploy/03-pod-dual-nic.yaml`](../deploy/03-pod-dual-nic.yaml) | 双网卡 Pod 示例 |
 | [`deploy/04-nad-sriov-static-ip.yaml`](../deploy/04-nad-sriov-static-ip.yaml) | 固定 IP 的 NAD |
+| [`deploy/05-chained-conflist-podresources.json`](../deploy/05-chained-conflist-podresources.json) | conflist：calico → sriov，`chained` + `podresources` |
+| [`deploy/06-chained-conflist-pool.json`](../deploy/06-chained-conflist-pool.json) | conflist：calico → sriov，`chained` + `pool` |
+| [`deploy/07-chained-rbac.yaml`](../deploy/07-chained-rbac.yaml) | 给 chained 插件签发 token 用的 `pods/get` ServiceAccount |
+| [`deploy/08-pod-chained.yaml`](../deploy/08-pod-chained.yaml) | 只靠注解的双网卡 Pod（无 Multus、无 NAD） |
 | [`deploy/test-cni.sh`](../deploy/test-cni.sh) | 无集群的 ADD/DEL 冒烟测试 |
 
 ---
@@ -190,7 +226,12 @@ $ gofmt -l .                     无输出
 $ go vet ./...                   clean
 $ go build ./...                 OK  (静态链接 ELF，CGO_ENABLED=0)
 $ go test ./...
-    ok  github.com/example/sriov-cni/pkg/sriov    # sysfs 拓扑解析（假 sysfs 树）
+    ok  github.com/example/sriov-cni/pkg/sriov        # sysfs 拓扑解析（假 sysfs 树）
+    ok  github.com/example/sriov-cni/pkg/config       # mode / vfAllocator 校验
+    ok  github.com/example/sriov-cni/pkg/chain        # 配置合并、prevResult 追加
+    ok  github.com/example/sriov-cni/pkg/pool         # VF 池分配（假 sysfs 树）
+    ok  github.com/example/sriov-cni/pkg/podresources # 对接假 kubelet gRPC 服务
+    ok  github.com/example/sriov-cni/pkg/k8s          # 对接假 API server
     ok  github.com/example/sriov-cni/pkg/ns       # netns 进出与还原（需 root）
 $ CNI_COMMAND=VERSION ./build/sriov
     {"cniVersion":"1.1.0","supportedVersions":["0.1.0","0.2.0","0.3.0","0.3.1","0.4.0","1.0.0","1.1.0"]}

@@ -30,10 +30,12 @@ func SaveCachedConf(containerID, deviceID, ifName string, conf *NetConf) error {
 
 // LoadCachedConf 读取缓存配置。
 func LoadCachedConf(containerID, deviceID, ifName string) (*NetConf, error) {
-	path := cachePath(containerID, deviceID, ifName)
+	path, err := resolveCachePath(containerID, deviceID, ifName)
+	if err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		// 兼容：deviceID 未知时用前缀匹配
 		if !os.IsNotExist(err) {
 			return nil, err
 		}
@@ -48,7 +50,25 @@ func LoadCachedConf(containerID, deviceID, ifName string) (*NetConf, error) {
 
 // RemoveCachedConf 删除缓存。
 func RemoveCachedConf(containerID, deviceID, ifName string) {
-	_ = os.Remove(cachePath(containerID, deviceID, ifName))
+	if path, err := resolveCachePath(containerID, deviceID, ifName); err == nil {
+		_ = os.Remove(path)
+	}
+}
+
+// resolveCachePath 在 deviceID 已知时直接拼路径；未知时（chained 模式的 DEL，
+// runtime 不会再给 deviceID）按 containerID 和 ifName 通配查找。
+func resolveCachePath(containerID, deviceID, ifName string) (string, error) {
+	if deviceID != "" {
+		return cachePath(containerID, deviceID, ifName), nil
+	}
+	pattern := filepath.Join(CacheDir, fmt.Sprintf("%s-*-%s.json",
+		strings.ReplaceAll(containerID, string(os.PathSeparator), "_"),
+		strings.ReplaceAll(ifName, string(os.PathSeparator), "_")))
+	matches, err := filepath.Glob(pattern)
+	if err != nil || len(matches) == 0 {
+		return "", fmt.Errorf("sriov: no cached state for container %s iface %s", containerID, ifName)
+	}
+	return matches[0], nil
 }
 
 func cachePath(containerID, deviceID, ifName string) string {

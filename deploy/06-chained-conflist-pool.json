@@ -1,0 +1,39 @@
+{
+  "_comment": "chained 模式 + pool：不需要 Device Plugin，由 CNI 自己从 ens1f0 下的 VF 里分配。代价：调度器看不到 VF 数量，用完时 Pod 会在 CNI ADD 阶段失败。",
+  "name": "k8s-pod-network",
+  "cniVersion": "1.0.0",
+  "plugins": [
+    {
+      "type": "calico",
+      "datastore_type": "kubernetes",
+      "ipam": { "type": "calico-ipam" },
+      "policy": { "type": "k8s" },
+      "kubernetes": { "kubeconfig": "/etc/cni/net.d/calico-kubeconfig" }
+    },
+    {
+      "type": "sriov",
+      "mode": "chained",
+      "vfAllocator": "pool",
+      "logLevel": "info",
+      "logFile": "/var/log/sriov-cni.log",
+
+      "kubernetes": {
+        "apiServer": "https://10.96.0.1:443",
+        "tokenFile": "/etc/cni/net.d/sriov.d/token",
+        "caFile": "/etc/cni/net.d/sriov.d/ca.crt"
+      },
+      "pool": {
+        "pfNames": ["ens1f0"],
+        "stateDir": "/var/lib/cni/sriov/pool"
+      },
+
+      "networks": {
+        "vlan1000": {
+          "vlan": 1000,
+          "spoofchk": "off",
+          "ipam": { "type": "host-local", "subnet": "192.168.100.0/24" }
+        }
+      }
+    }
+  ]
+}

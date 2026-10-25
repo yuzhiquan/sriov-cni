@@ -16,6 +16,7 @@ A minimal SR-IOV CNI plugin that **compiles, runs, and ships with unit tests**, 
 | **[05 · Troubleshooting and Tuning](./docs/05-troubleshooting-and-tuning.md)** | Failure lookup table, diagnostic command set, NUMA/interrupt/hugepage tuning, production checklist |
 | **[06 · vs macvlan / ipvlan](./docs/06-vs-macvlan-ipvlan.md)** | SR-IOV vs macvlan vs ipvlan comparison |
 | **[07 · VF Isolation and Bandwidth](./docs/07-vf-isolation-and-bandwidth.md)** | Isolation between VFs and bandwidth partitioning |
+| **[08 · Running Without Multus](./docs/08-running-without-multus.md)** | `chained` mode (annotation-driven second NIC), `podresources` / `pool` VF allocators, trade-offs |
 
 **Code**
 
@@ -25,6 +26,10 @@ pkg/config/           Config parsing, validation, state cache
 pkg/sriov/            ★ VF topology discovery + hardware attribute setup + netns move
 pkg/ipam/             IPAM delegate + address/route/policy-route setup
 pkg/ns/               netns enter/exit wrapper (thread locking)
+pkg/chain/            chained mode: config merge + appending to prevResult
+pkg/k8s/              chained mode: read Pod annotations from the API server
+pkg/podresources/     VF source "podresources": ask kubelet which device the Pod got
+pkg/pool/             VF source "pool": node-local VF allocator (flock + state files)
 ```
 
 ---
@@ -70,7 +75,9 @@ export GOPROXY=https://goproxy.cn,direct   # for mainland China
 | `github.com/containernetworking/cni` | v1.2.3 |
 | `github.com/vishvananda/netlink` | v1.2.1 |
 | `github.com/vishvananda/netns` | v0.0.4 |
-| `golang.org/x/sys` | v0.17.0 |
+| `golang.org/x/sys` | v0.20.0 |
+| `google.golang.org/grpc` | v1.51.0 |
+| `k8s.io/kubelet` | v0.27.4 |
 
 ---
 
@@ -156,7 +163,30 @@ echo '{"cniVersion":"1.0.0","name":"n","type":"sriov","ipam":{}}' \
 | `dpdk` | `false` | When true, skips the netns move |
 | `resetOnDel` | `true` | Whether to restore the VF on DEL |
 
-The three sources of `deviceID` (by priority): top-level `deviceID` → `runtimeConfig.deviceID` → the `PCIDEVICE_*` environment variable.
+The three static sources of `deviceID` (by priority): top-level `deviceID` → `runtimeConfig.deviceID` → the `PCIDEVICE_*` environment variable. If none is set, `vfAllocator` decides (below).
+
+### Running without Multus (optional)
+
+Two independent switches; the defaults keep the Multus-based behavior above. Details in [doc 08](./docs/08-running-without-multus.md).
+
+| Field | Default | Description |
+|---|---|---|
+| `mode` | `multus` | `chained`: run after the primary CNI in a conflist, read a Pod annotation, attach `secondaryIfName` (default `net1`); Pods without the annotation pass through untouched |
+| `vfAllocator` | `injected` | `podresources`: ask kubelet which VF the Device Plugin allocated. `pool`: allocate from a node-local pool, no Device Plugin needed (the scheduler cannot see it) |
+| `annotation` | `sriov.example.com/network` | (chained) Pod annotation whose value names an entry in `networks` |
+| `networks` | — | (chained) `name → config overlay`; top-level keys override the base config, `ipam` is replaced as a whole |
+| `kubernetes` | — | (chained) `apiServer`, `tokenFile`, `caFile`, `timeoutMs` for reading the Pod |
+| `podResources` | — | (`podresources`) `resource` (required), `socket`, `index`, `timeoutMs` |
+| `pool` | — | (`pool`) `pfNames` and/or `devices`, `stateDir` |
+
+```json
+{ "type": "sriov", "mode": "chained", "vfAllocator": "podresources",
+  "kubernetes": { "apiServer": "https://10.96.0.1:443", "tokenFile": "/etc/cni/net.d/sriov.d/token", "caFile": "/etc/cni/net.d/sriov.d/ca.crt" },
+  "podResources": { "resource": "intel.com/intel_sriov_netdevice" },
+  "networks": { "vlan1000": { "vlan": 1000, "ipam": { "type": "whereabouts", "range": "192.168.100.0/24" } } } }
+```
+
+A Pod then only needs `metadata.annotations: { sriov.example.com/network: vlan1000 }`.
 
 ---
 
@@ -169,6 +199,10 @@ The three sources of `deviceID` (by priority): top-level `deviceID` → `runtime
 | [`deploy/02-nad-sriov-vlan1000.yaml`](./deploy/02-nad-sriov-vlan1000.yaml) | NetworkAttachmentDefinition (whereabouts / policy-routing variants) |
 | [`deploy/03-pod-dual-nic.yaml`](./deploy/03-pod-dual-nic.yaml) | Dual-NIC Pod example |
 | [`deploy/04-nad-sriov-static-ip.yaml`](./deploy/04-nad-sriov-static-ip.yaml) | NAD with a static IP |
+| [`deploy/05-chained-conflist-podresources.json`](./deploy/05-chained-conflist-podresources.json) | conflist: calico → sriov, `chained` + `podresources` |
+| [`deploy/06-chained-conflist-pool.json`](./deploy/06-chained-conflist-pool.json) | conflist: calico → sriov, `chained` + `pool` |
+| [`deploy/07-chained-rbac.yaml`](./deploy/07-chained-rbac.yaml) | ServiceAccount with `pods/get` for the chained plugin's token |
+| [`deploy/08-pod-chained.yaml`](./deploy/08-pod-chained.yaml) | Annotation-only dual-NIC Pods (no Multus, no NAD) |
 | [`deploy/test-cni.sh`](./deploy/test-cni.sh) | ADD/DEL smoke test without a cluster |
 
 ---
@@ -191,7 +225,12 @@ $ gofmt -l .                     no output
 $ go vet ./...                   clean
 $ go build ./...                 OK  (statically linked ELF, CGO_ENABLED=0)
 $ go test ./...
-    ok  github.com/example/sriov-cni/pkg/sriov    # sysfs topology parsing (fake sysfs tree)
+    ok  github.com/example/sriov-cni/pkg/sriov        # sysfs topology parsing (fake sysfs tree)
+    ok  github.com/example/sriov-cni/pkg/config       # mode / vfAllocator validation
+    ok  github.com/example/sriov-cni/pkg/chain        # config merge, prevResult append
+    ok  github.com/example/sriov-cni/pkg/pool         # VF pool allocation (fake sysfs tree)
+    ok  github.com/example/sriov-cni/pkg/podresources # against a fake kubelet gRPC server
+    ok  github.com/example/sriov-cni/pkg/k8s          # against a fake API server
     ok  github.com/example/sriov-cni/pkg/ns       # netns enter/exit and restore (requires root)
 $ CNI_COMMAND=VERSION ./build/sriov
     {"cniVersion":"1.1.0","supportedVersions":["0.1.0","0.2.0","0.3.0","0.3.1","0.4.0","1.0.0","1.1.0"]}
