@@ -1,5 +1,5 @@
 {
-  "_comment": "chained 模式 + podresources：主 CNI(calico) 之后链式调用 sriov。放到 /etc/cni/net.d/10-calico-sriov.conflist（先删除原来的 10-calico.conflist，避免重复）。VF 由 Device Plugin 分配，本插件向 kubelet 查询。",
+  "_comment": "chained mode + podresources: invoke sriov in a chain after the primary CNI (calico). Place at /etc/cni/net.d/10-calico-sriov.conflist (delete the original 10-calico.conflist first to avoid duplicates). VFs are allocated by the Device Plugin; this plugin queries the kubelet.",
   "name": "k8s-pod-network",
   "cniVersion": "1.0.0",
   "plugins": [

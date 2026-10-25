@@ -1,10 +1,10 @@
-# chained 模式下的双网卡 Pod：只需要一个注解，不需要 Multus / NAD。
+# Dual-NIC Pod in chained mode: only one annotation needed, no Multus / NAD.
 #
-#   eth0 : 主 CNI(calico) 分配
-#   net1 : sriov 链式插件按注解值 "vlan1000" 在 conflist 的 networks 里查到配置后创建
+#   eth0 : assigned by the primary CNI (calico)
+#   net1 : created by the sriov chained plugin, which looks up the annotation value "vlan1000" in the conflist networks
 #
-# 变体 A（vfAllocator=podresources）：必须声明 resources.limits，调度器和 Device Plugin 才会分配 VF。
-# 变体 B（vfAllocator=pool）：不需要 resources，VF 由 CNI 从节点本地池里分配。
+# Variant A (vfAllocator=podresources): resources.limits must be declared so the scheduler and Device Plugin allocate a VF.
+# Variant B (vfAllocator=pool): no resources needed; the CNI allocates a VF from the node-local pool.
 apiVersion: v1
 kind: Pod
 metadata:

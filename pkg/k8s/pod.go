@@ -1,7 +1,7 @@
-// Package k8s 提供 chained 模式需要的最小 Kubernetes 访问能力：
-// 按 CNI_ARGS 里的 Pod 名读取 Pod 注解。
+// Package k8s provides the minimal Kubernetes access needed by chained mode:
+// reading Pod annotations by the Pod name in CNI_ARGS.
 //
-// 不引入 client-go：CNI 是一次性短进程，只需要一个带 CA/Token 的 GET。
+// client-go is deliberately not used: the CNI is a short-lived process and only needs one GET with CA/Token.
 package k8s
 
 import (
@@ -19,24 +19,24 @@ import (
 	"github.com/containernetworking/cni/pkg/types"
 )
 
-// Conf 描述如何访问 API server。节点上的 CNI 不是 Pod，没有 in-cluster 环境变量，
-// 所以必须显式配置。Token 建议用只有 pods/get 权限的 ServiceAccount 生成。
+// Conf describes how to reach the API server. The CNI on the node is not a Pod and has no in-cluster env vars,
+// so it must be configured explicitly. Generate the Token from a ServiceAccount with only pods/get permission.
 type Conf struct {
-	APIServer string `json:"apiServer"` // 如 https://10.0.0.1:6443
-	TokenFile string `json:"tokenFile"` // 含 Bearer token 的文件
-	CAFile    string `json:"caFile"`    // API server CA；为空则使用系统根证书
-	TimeoutMs int    `json:"timeoutMs"` // 默认 5000
+	APIServer string `json:"apiServer"` // e.g. https://10.0.0.1:6443
+	TokenFile string `json:"tokenFile"` // file containing the Bearer token
+	CAFile    string `json:"caFile"`    // API server CA; system roots are used if empty
+	TimeoutMs int    `json:"timeoutMs"` // default 5000
 }
 
-// PodArgs 是 kubelet/容器运行时通过 CNI_ARGS 传入的 Pod 标识。
+// PodArgs is the Pod identity passed by kubelet/container runtime via CNI_ARGS.
 type PodArgs struct {
 	types.CommonArgs
-	// types.LoadArgs 按字段名（而非 json tag）匹配 CNI_ARGS 的键，所以必须用原名。
+	// types.LoadArgs matches CNI_ARGS keys by field name (not json tag), so the original names must be used.
 	K8S_POD_NAME      types.UnmarshallableString //nolint:revive,stylecheck
 	K8S_POD_NAMESPACE types.UnmarshallableString //nolint:revive,stylecheck
 }
 
-// ParsePodArgs 解析 CNI_ARGS，返回 Pod 名与命名空间。
+// ParsePodArgs parses CNI_ARGS and returns the Pod name and namespace.
 func ParsePodArgs(cniArgs string) (name, namespace string, err error) {
 	a := PodArgs{}
 	if err = types.LoadArgs(cniArgs, &a); err != nil {
@@ -49,7 +49,7 @@ func ParsePodArgs(cniArgs string) (name, namespace string, err error) {
 	return name, namespace, nil
 }
 
-// GetPodAnnotations 读取指定 Pod 的 metadata.annotations。
+// GetPodAnnotations reads metadata.annotations of the given Pod.
 func GetPodAnnotations(c *Conf, namespace, name string) (map[string]string, error) {
 	if c == nil || c.APIServer == "" {
 		return nil, fmt.Errorf(`k8s: chained mode needs "kubernetes.apiServer" in the CNI config`)

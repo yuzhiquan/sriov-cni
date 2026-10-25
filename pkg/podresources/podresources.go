@@ -1,12 +1,12 @@
-// Package podresources 通过 kubelet 的 PodResources gRPC 接口，
-// 查出"Device Plugin 把哪些设备分配给了某个 Pod"。
+// Package podresources uses the kubelet PodResources gRPC API
+// to look up which devices the Device Plugin allocated to a given Pod.
 //
-// 这正是 Multus（thick 版）注入 deviceID 时做的事：
+// This is what Multus (thick) does when injecting deviceID:
 //
-//	kubelet Admit Pod -> Device Plugin Allocate() -> 记录分配结果
-//	                  -> 创建 sandbox -> CNI ADD   <- 此时 List() 已能查到
+//	kubelet Admit Pod -> Device Plugin Allocate() -> records the allocation
+//	                  -> creates sandbox -> CNI ADD   <- List() can see it by now
 //
-// sriov-network-device-plugin 上报的 device ID 就是 VF 的 PCI 地址。
+// sriov-network-device-plugin reports device IDs that are the VF PCI addresses.
 package podresources
 
 import (
@@ -19,12 +19,12 @@ import (
 	podresourcesv1 "k8s.io/kubelet/pkg/apis/podresources/v1"
 )
 
-// DefaultSocket 是 kubelet 默认的 PodResources socket 路径。
+// DefaultSocket is the default kubelet PodResources socket path.
 const DefaultSocket = "/var/lib/kubelet/pod-resources/kubelet.sock"
 
-// FindDevices 返回 pod 在 resource 这个资源名下被分配到的全部设备 ID。
-// resource 为空表示不过滤资源名（返回该 Pod 所有设备）。
-// 调用方应通过 ctx 控制总超时。
+// FindDevices returns all device IDs allocated to the pod under the resource name.
+// An empty resource disables resource-name filtering (returns all devices of the Pod).
+// Callers should bound the total time via ctx.
 func FindDevices(ctx context.Context, socket, podName, podNamespace, resource string) ([]string, error) {
 	if socket == "" {
 		socket = DefaultSocket
@@ -59,8 +59,8 @@ func FindDevices(ctx context.Context, socket, podName, podNamespace, resource st
 	return ids, nil
 }
 
-// WaitForDevices 在 timeout 内重试 FindDevices，直到查到至少一个设备。
-// 重试是为了容忍 kubelet 刚完成准入、PodResources 缓存尚未刷新的短暂窗口。
+// WaitForDevices retries FindDevices within timeout until at least one device is found.
+// Retrying tolerates the brief window after kubelet admission before the PodResources cache is refreshed.
 func WaitForDevices(socket, podName, podNamespace, resource string, timeout time.Duration) ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()

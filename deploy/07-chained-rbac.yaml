@@ -1,12 +1,12 @@
-# chained 模式下，节点上的 CNI 进程需要读 Pod 注解。
-# 这里建一个只有 pods/get 权限的 ServiceAccount，再签发 token 写到每个节点：
+# In chained mode, the CNI process on each node needs to read Pod annotations.
+# Create a ServiceAccount with only pods/get permission, then issue a token and write it to every node:
 #
 #   kubectl apply -f 07-chained-rbac.yaml
 #   kubectl -n kube-system create token sriov-cni --duration=8760h > /etc/cni/net.d/sriov.d/token
 #   kubectl -n kube-system get cm kube-root-ca.crt -o jsonpath='{.data.ca\.crt}' > /etc/cni/net.d/sriov.d/ca.crt
 #   chmod 600 /etc/cni/net.d/sriov.d/token
 #
-# token 有过期时间，需要定期轮转（可用 CronJob/DaemonSet 刷新到节点）。
+# The token expires and must be rotated periodically (e.g. refresh it onto nodes via a CronJob/DaemonSet).
 apiVersion: v1
 kind: ServiceAccount
 metadata:

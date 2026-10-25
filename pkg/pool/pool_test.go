@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// fakeSysfs 造一棵 PF + n 个 VF 的假 sysfs，返回 PF 名。
+// fakeSysfs builds a fake sysfs tree with a PF and n VFs, and returns the PF name.
 func fakeSysfs(t *testing.T, n int) {
 	t.Helper()
 	root := t.TempDir()
@@ -51,14 +51,14 @@ func TestAllocateReleaseCycle(t *testing.T) {
 		t.Fatal("pool of 2 should be exhausted")
 	}
 
-	// ADD 重试：同一 owner 拿到同一个 VF
+	// ADD retry: the same owner gets the same VF
 	again, err := Allocate(c, "c1/net1")
 	must(t, err)
 	if again != a {
 		t.Errorf("retry got %s, want %s", again, a)
 	}
 
-	// 非持有者释放无效；持有者释放后可被复用
+	// Release by a non-owner is a no-op; after the owner releases, the VF can be reused
 	must(t, Release(c, a, "someone-else"))
 	if _, err := Allocate(c, "c3/net1"); err == nil {
 		t.Fatal("foreign Release must not free the VF")
@@ -73,7 +73,7 @@ func TestAllocateReleaseCycle(t *testing.T) {
 
 func TestAllocateSkipsVFWithoutHostNetdev(t *testing.T) {
 	fakeSysfs(t, 2)
-	// VF0 已被搬进别的 Pod：host 上不再有 net/ 条目
+	// VF0 was moved into another Pod: the host no longer has a net/ entry
 	must(t, os.RemoveAll(filepath.Join(sysBusPci, "0000:03:02.0", "net", "ens1f0v0")))
 
 	c := &Conf{Devices: []string{"0000:03:02.0", "0000:03:02.1"}, StateDir: t.TempDir()}

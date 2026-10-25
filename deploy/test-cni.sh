@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# 不依赖 k8s 集群，直接手动调用 sriov-cni 做一次完整的 ADD / 验证 / DEL 冒烟测试。
+# Without a k8s cluster, invoke sriov-cni by hand for a full ADD / verify / DEL smoke test.
 #
-# 前提：
-#   1. 节点上已经创建好 SR-IOV VF（见 setup-vfs.sh）
-#   2. VF 绑定了内核驱动（iavf/ixgbevf/mlx5_core），即有 netdev
-#   3. 有 static 或 host-local IPAM 插件（可选，没有则跳过 IPAM）
+# Prerequisites:
+#   1. SR-IOV VFs already created on the node (see setup-vfs.sh)
+#   2. VF bound to a kernel driver (iavf/ixgbevf/mlx5_core), i.e. has a netdev
+#   3. A static or host-local IPAM plugin is available (optional; IPAM is skipped if absent)
 #
-# 用法：
-#   sudo ./test-cni.sh                      # 自动挑第一个可用 VF
+# Usage:
+#   sudo ./test-cni.sh                      # auto-pick the first usable VF
 #   sudo ./test-cni.sh --device 0000:03:02.1
 #   sudo ./test-cni.sh --plugin ./build/sriov --device 0000:03:02.1 --vlan 1000
 #
@@ -33,7 +33,7 @@ while [[ $# -gt 0 ]]; do
         --device)  DEVICE="$2"; shift 2 ;;
         --vlan)    VLAN="$2"; shift 2 ;;
         -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
-        *) error "未知参数: $1"; exit 1 ;;
+        *) error "Unknown argument: $1"; exit 1 ;;
     esac
 done
 
@@ -43,28 +43,28 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# ---------- 0. 环境检查 ----------
-step "检查插件二进制"
-[[ -x "$PLUGIN" ]] || { error "找不到可执行插件: $PLUGIN（先执行 ./build.sh）"; exit 1; }
-info "插件: $PLUGIN"
+# ---------- 0. Environment check ----------
+step "Check plugin binary"
+[[ -x "$PLUGIN" ]] || { error "Executable plugin not found: $PLUGIN (run ./build.sh first)"; exit 1; }
+info "Plugin: $PLUGIN"
 
 "$PLUGIN" <<< '{}' 2>/dev/null >/dev/null || true
 info "VERSION=$(CNI_COMMAND=VERSION "$PLUGIN")"
 
-# ---------- 1. 找一个空闲 VF ----------
-step "查找可用的 SR-IOV VF"
+# ---------- 1. Find a free VF ----------
+step "Find an available SR-IOV VF"
 if [[ -z "$DEVICE" ]]; then
     for pfdev in /sys/class/net/*/device; do
         pf=$(basename "$(dirname "$(dirname "$pfdev")")")
         [[ -d "$pfdev" ]] || continue
-        [[ -e "$pfdev/physfn" ]] && continue   # 跳过 VF 自己
+        [[ -e "$pfdev/physfn" ]] && continue   # skip the VF itself
         for vf in "$pfdev"/virtfn*; do
             [[ -e "$vf" ]] || continue
             bdf=$(basename "$(readlink -f "$vf")")
-            # 有 netdev 说明绑了内核驱动
+            # has a netdev, so a kernel driver is bound
             if [[ -d "/sys/bus/pci/devices/$bdf/net" ]]; then
                 DEVICE="$bdf"
-                info "选中 VF: $DEVICE (PF=$pf)"
+                info "Selected VF: $DEVICE (PF=$pf)"
                 break 2
             fi
         done
@@ -72,24 +72,24 @@ if [[ -z "$DEVICE" ]]; then
 fi
 
 if [[ -z "$DEVICE" ]]; then
-    error "未找到可用的 SR-IOV VF"
+    error "No available SR-IOV VF found"
     cat <<'EOF'
 
-        可能原因：
-          1. BIOS 未开启 SR-IOV / Above 4G Decoding
-          2. 尚未创建 VF：
+        Possible causes:
+          1. SR-IOV / Above 4G Decoding not enabled in BIOS
+          2. VFs not created yet:
                echo 8 > /sys/class/net/<PF>/device/sriov_numvfs
-          3. VF 被绑到了 vfio-pci（DPDK 模式），没有 netdev：
+          3. VF is bound to vfio-pci (DPDK mode), so there is no netdev:
                driverctl list-devices
-          4. 这台机器/云主机压根没有 SR-IOV 网卡
+          4. This machine/VM has no SR-IOV NIC at all
 
-        用 './setup-vfs.sh --check' 做一次完整检查。
+        Run './setup-vfs.sh --check' for a full check.
 EOF
     exit 1
 fi
 
-# ---------- 2. 准备 netns 与 IPAM ----------
-step "准备环境"
+# ---------- 2. Prepare netns and IPAM ----------
+step "Prepare environment"
 ip netns add "$NSNAME"
 NETNS="/var/run/netns/$NSNAME"
 info "netns: $NETNS"
@@ -106,7 +106,7 @@ if [[ -f "/opt/cni/bin/$IPAM_TYPE" ]]; then
 EOF
 )
 else
-    warn "未找到 IPAM 插件 /opt/cni/bin/$IPAM_TYPE，本次跳过 IPAM 验证"
+    warn "IPAM plugin /opt/cni/bin/$IPAM_TYPE not found, skipping IPAM verification"
 fi
 
 CONF=$(cat <<EOF
@@ -126,7 +126,7 @@ EOF
 echo "$CONF" | jq . 2>/dev/null || echo "$CONF"
 
 # ---------- 3. ADD ----------
-step "执行 CNI ADD"
+step "Run CNI ADD"
 RESULT=$(echo "$CONF" | CNI_COMMAND=ADD \
     CNI_CONTAINERID=smoke-test-$$ \
     CNI_NETNS="$NETNS" \
@@ -136,7 +136,7 @@ RESULT=$(echo "$CONF" | CNI_COMMAND=ADD \
     "$PLUGIN")
 echo "$RESULT" | jq . 2>/dev/null || echo "$RESULT"
 
-step "验证 Pod netns 内的网卡"
+step "Verify NIC inside Pod netns"
 echo "--- ip -br link ---"
 ip netns exec "$NSNAME" ip -br link
 echo "--- ip -br addr ---"
@@ -144,20 +144,20 @@ ip netns exec "$NSNAME" ip -br addr
 echo "--- bus-info ---"
 ip netns exec "$NSNAME" sh -c "readlink -f /sys/class/net/$IFNAME/device"
 
-step "验证宿主侧 VF 属性已被改写"
+step "Verify host-side VF attributes were rewritten"
 ip link show "$(ls -d /sys/class/net/*/device | head -1 | xargs dirname | xargs dirname | xargs basename)" 2>/dev/null \
   | sed -n 's/^    \(vf .*\)/  \1/p' || true
 
-step "执行 CNI DEL"
+step "Run CNI DEL"
 CONTAINER_ID="smoke-test-$$"
 echo "$CONF" | CNI_COMMAND=DEL \
     CNI_CONTAINERID="$CONTAINER_ID" \
     CNI_NETNS="$NETNS" \
     CNI_IFNAME="$IFNAME" \
     CNI_PATH=/opt/cni/bin \
-    "$PLUGIN" && info "DEL 成功"
+    "$PLUGIN" && info "DEL succeeded"
 
-step "确认 VF 已回到宿主"
+step "Confirm VF returned to host"
 ip -br link | grep -E "v[0-9]+" || true
 
-info "冒烟测试完成"
+info "Smoke test complete"

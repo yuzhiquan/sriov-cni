@@ -1,11 +1,11 @@
-# SR-IOV Network Device Plugin 资源配置
+# SR-IOV Network Device Plugin resource config
 #
-# 资源全名 = <resourcePrefix>/<resourceName>
+# Full resource name = <resourcePrefix>/<resourceName>
 #   ↓
-#   intel.com/intel_sriov_netdevice   （netdevice 模式，VF 绑内核驱动）
-#   intel.com/intel_sriov_dpdk        （vfio 模式，VF 绑 vfio-pci）
+#   intel.com/intel_sriov_netdevice   (netdevice mode, VF bound to kernel driver)
+#   intel.com/intel_sriov_dpdk        (vfio mode, VF bound to vfio-pci)
 #
-# 部署：
+# Deploy:
 #   kubectl apply -f 01-device-plugin-cm.yaml
 #   kubectl apply -f https://raw.githubusercontent.com/k8snetworkplumbingwg/sriov-network-device-plugin/master/deployments/k8s-v1.16/sriovdp-daemonset.yaml
 apiVersion: v1
@@ -42,14 +42,14 @@ data:
       ]
     }
 ---
-# 常用厂商 / 设备 ID 速查
+# Common vendor / device ID cheat sheet
 #
-#   Intel 8086:1889  iavf        (E810 / 700 系列 VF)
+#   Intel 8086:1889  iavf        (E810 / 700-series VF)
 #   Intel 8086:154c  ixgbevf     (X710/XL710 VF)
 #   Intel 8086:1889  ice vf
 #   Mellanox 15b3:1017 ConnectX-5/6 VF
 #   Broadcom 14e4:16dc BCM575xx VF
 #
-# 查看本机：
+# Inspect this host:
 #   lspci -nn | grep -i "virtual function"
 #   lspci -nn | grep -i ethernet

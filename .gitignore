@@ -1,4 +1,4 @@
-# 编译产物
+# Build artifacts
 build/
 /dist/
 /sriov
@@ -9,11 +9,11 @@ build/
 *.out
 coverage.txt
 
-# 编辑器 / 系统
+# Editor / OS
 .idea/
 .vscode/
 *.swp
 .DS_Store
 
-# 运行时日志
+# Runtime logs
 *.log

@@ -30,9 +30,9 @@ install: build
 	install -m 0755 $(BINARY) $(CNI_BIN_DIR)/sriov
 	@echo "installed: $(CNI_BIN_DIR)/sriov"
 
-# 需要有真实 SR-IOV 硬件
+# Requires real SR-IOV hardware
 smoke: build
-	@echo "==> 检查硬件"
+	@echo "==> Check hardware"
 	sudo ./deploy/setup-vfs.sh --check
-	@echo "==> 手动调用插件"
+	@echo "==> Invoke plugin manually"
 	sudo ./deploy/test-cni.sh --plugin $(CURDIR)/$(BINARY)

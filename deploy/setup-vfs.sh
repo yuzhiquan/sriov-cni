@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# 节点侧一次性准备：检查硬件/BIOS/IOMMU，创建并持久化 SR-IOV VF。
+# One-time node setup: check hardware/BIOS/IOMMU, create and persist SR-IOV VFs.
 #
-# 用法：
-#   sudo ./setup-vfs.sh --pf ens1f0 --numvfs 8          # 创建 VF + 持久化
-#   sudo ./setup-vfs.sh --pf ens1f0 --numvfs 8 --persist  # 同上（默认）
-#   ./setup-vfs.sh --check                               # 只做检查，不改动
+# Usage:
+#   sudo ./setup-vfs.sh --pf ens1f0 --numvfs 8          # create VFs + persist
+#   sudo ./setup-vfs.sh --pf ens1f0 --numvfs 8 --persist  # same as above (default)
+#   ./setup-vfs.sh --check                               # check only, no changes
 #
 set -euo pipefail
 
@@ -20,12 +20,12 @@ error() { printf '%s[ERROR]%s %s\n' "$RED" "$NC" "$*"; }
 
 usage() {
     cat <<'EOF'
-用法: setup-vfs.sh [选项]
-  --pf <netdev>       PF 的 netdev 名，如 ens1f0（默认自动探测第一个支持 SR-IOV 的网卡）
-  --numvfs <N>        要创建的 VF 数量（默认 8）
-  --no-persist        不写 systemd unit（仅本次生效）
-  --check             只检查不修改
-  -h, --help          显示帮助
+Usage: setup-vfs.sh [options]
+  --pf <netdev>       PF netdev name, e.g. ens1f0 (default: auto-detect first SR-IOV capable NIC)
+  --numvfs <N>        Number of VFs to create (default 8)
+  --no-persist        Do not write a systemd unit (this boot only)
+  --check             Check only, make no changes
+  -h, --help          Show help
 EOF
 }
 
@@ -36,24 +36,24 @@ while [[ $# -gt 0 ]]; do
         --no-persist) PERSIST=0; shift ;;
         --check)     CHECK_ONLY=1; shift ;;
         -h|--help)   usage; exit 0 ;;
-        *) error "未知参数: $1"; usage; exit 1 ;;
+        *) error "Unknown argument: $1"; usage; exit 1 ;;
     esac
 done
 
 need_root() {
     if [[ $EUID -ne 0 ]]; then
-        error "请以 root 运行（需要写 /sys 和 /etc/systemd）"
+        error "Run as root (needs to write /sys and /etc/systemd)"
         exit 1
     fi
 }
 
-# ---------- 自动探测 PF ----------
+# ---------- Auto-detect PF ----------
 detect_pf() {
     local dev
     for dev in /sys/class/net/*; do
         local name; name=$(basename "$dev")
         [[ -e "$dev/device/sriov_totalvfs" ]] || continue
-        # 排除 VF 自己（VF 有 physfn 软链接）
+        # exclude VFs themselves (a VF has a physfn symlink)
         [[ -e "$dev/device/physfn" ]] && continue
         echo "$name"
         return 0
@@ -61,9 +61,9 @@ detect_pf() {
     return 1
 }
 
-# ---------- 检查 ----------
+# ---------- Check ----------
 do_check() {
-    echo "================ 1. 网卡与 SR-IOV 能力 ================"
+    echo "================ 1. NICs and SR-IOV capability ================"
     local found=0
     for dev in /sys/class/net/*; do
         local name; name=$(basename "$dev")
@@ -76,63 +76,63 @@ do_check() {
         cur=$(cat "$dev/device/sriov_numvfs" 2>/dev/null || echo 0)
         echo "  PF: $name  $bdf   totalvfs=$total  numvfs=$cur"
     done
-    [[ $found -eq 1 ]] || { error "未发现支持 SR-IOV 的网卡（检查 BIOS 与网卡型号）"; exit 1; }
+    [[ $found -eq 1 ]] || { error "No SR-IOV capable NIC found (check BIOS and NIC model)"; exit 1; }
 
     echo
-    echo "================ 2. IOMMU 状态 ================"
+    echo "================ 2. IOMMU status ================"
     if dmesg 2>/dev/null | grep -qi "DMAR: Intel-IOMMU enabled\|AMD-Vi:.*initialized"; then
-        info "IOMMU 已启用"
+        info "IOMMU enabled"
     else
-        warn "IOMMU 未启用 —— netdevice 模式可以正常工作；DPDK/vfio 模式需要它"
-        echo "        在 /etc/default/grub 里加 intel_iommu=on iommu=pt（AMD: amd_iommu=on），然后 update-grub && reboot"
+        warn "IOMMU not enabled -- netdevice mode works without it; DPDK/vfio mode requires it"
+        echo "        Add intel_iommu=on iommu=pt (AMD: amd_iommu=on) to /etc/default/grub, then run update-grub && reboot"
     fi
 
     echo
-    echo "================ 3. VF netdev 是否被网络管理工具接管 ================"
+    echo "================ 3. Whether VF netdevs are claimed by a network manager ================"
     if command -v nmcli >/dev/null 2>&1; then
         local managed
         managed=$(nmcli -t -f DEVICE,STATE dev status 2>/dev/null | grep -E "v[0-9]+:" | grep -v "unmanaged" || true)
         if [[ -n "$managed" ]]; then
-            warn "以下 VF 被 NetworkManager 管理，会导致 CNI 搬不动："
+            warn "These VFs are managed by NetworkManager, which prevents the CNI from moving them:"
             echo "$managed" | sed 's/^/        /'
-            echo "        建议：echo '[keyfile]' > /etc/NetworkManager/conf.d/10-sriov-vf-unmanaged.conf"
-            echo "        再追加 unmanaged-devices=interface-name:ens1f0v* 后 systemctl reload NetworkManager"
+            echo "        Suggested: echo '[keyfile]' > /etc/NetworkManager/conf.d/10-sriov-vf-unmanaged.conf"
+            echo "        Then append unmanaged-devices=interface-name:ens1f0v* and run systemctl reload NetworkManager"
         else
-            info "VF 均未被 NetworkManager 接管"
+            info "No VFs are managed by NetworkManager"
         fi
     else
-        info "未安装 NetworkManager，跳过检查"
+        info "NetworkManager not installed, skipping check"
     fi
 
     echo
-    echo "================ 4. 当前 VF 状态 ================"
+    echo "================ 4. Current VF status ================"
     if [[ -n "$PF" ]]; then
         ip link show "$PF" | sed -n 's/^    \(vf .*\)/  \1/p'
     fi
 }
 
-# ---------- 创建 VF ----------
+# ---------- Create VFs ----------
 do_create() {
     need_root
-    [[ -n "$PF" ]] || PF=$(detect_pf) || { error "无法自动探测 PF，请用 --pf 指定"; exit 1; }
+    [[ -n "$PF" ]] || PF=$(detect_pf) || { error "Cannot auto-detect PF, specify it with --pf"; exit 1; }
 
     local sysdev="/sys/class/net/$PF/device"
-    [[ -d "$sysdev" ]] || { error "$PF 没有对应的 PCI 设备"; exit 1; }
-    [[ -f "$sysdev/sriov_totalvfs" ]] || { error "$PF 不支持 SR-IOV"; exit 1; }
+    [[ -d "$sysdev" ]] || { error "$PF has no corresponding PCI device"; exit 1; }
+    [[ -f "$sysdev/sriov_totalvfs" ]] || { error "$PF does not support SR-IOV"; exit 1; }
 
     local total; total=$(cat "$sysdev/sriov_totalvfs")
-    info "PF=$PF  硬件支持 VF 上限=$total  本次创建=$NUMVFS"
+    info "PF=$PF  hardware max VFs=$total  to create=$NUMVFS"
 
     if [[ "$NUMVFS" -gt "$total" ]]; then
-        error "请求 $NUMVFS 个 VF，超过硬件上限 $total"
+        error "Requested $NUMVFS VFs, exceeds hardware limit $total"
         exit 1
     fi
 
-    # 改 numvfs 前必须先归零，否则驱动会报错
+    # must reset to 0 before changing numvfs, otherwise the driver errors
     echo 0 > "$sysdev/sriov_numvfs"
     echo "$NUMVFS" > "$sysdev/sriov_numvfs"
 
-    info "当前 VF："
+    info "Current VFs:"
     ip link show "$PF" | sed -n 's/^    \(vf .*\)/  \1/p'
 
     if [[ "$PERSIST" -eq 1 ]]; then
@@ -153,7 +153,7 @@ WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
         systemctl enable --now "sriov-vfs-${PF}.service"
-        info "已持久化：${unit}"
+        info "Persisted: ${unit}"
     fi
 }
 

@@ -1,13 +1,13 @@
 //go:build linux
 // +build linux
 
-// Package ns 提供网络命名空间的进出能力。
+// Package ns provides the ability to enter and leave network namespaces.
 //
-// 为什么必须自己小心处理线程：
-// setns(2) 只影响**调用它的那一个线程**，而 Go 的 goroutine 会在 OS 线程之间
-// 被调度器搬运。如果不把 goroutine 锁死在线程上，就可能出现"上半段在 Pod
-// netns、下半段突然回到 host netns"的诡异行为。这就是 CNI 插件里
-// runtime.LockOSThread() 无处不在的原因。
+// Why threads must be handled carefully:
+// setns(2) affects **only the calling thread**, while Go goroutines are moved between OS threads
+// by the scheduler. If a goroutine is not locked to its thread, you can get odd behavior where the first half runs in the Pod
+// netns and the second half suddenly runs in the host netns. This is why
+// runtime.LockOSThread() is everywhere in CNI plugins.
 package ns
 
 import (
@@ -20,18 +20,18 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// NetNS 是对一个网络命名空间句柄的抽象。
+// NetNS abstracts a handle to a network namespace.
 type NetNS interface {
-	// Path 返回该 netns 在 /proc 或 /var/run/netns 下的路径
+	// Path returns the path of this netns under /proc or /var/run/netns
 	Path() string
-	// Fd 返回可用于 setns / netlink 操作的 fd
+	// Fd returns an fd usable for setns / netlink operations
 	Fd() uintptr
-	// Set 把当前线程切换到该 netns
+	// Set switches the current thread into this netns
 	Set() error
-	// Do 在该 netns 内执行闭包，参数是把"原来的"netns 传进去，
-	// 方便闭包里把设备搬回去。
+	// Do runs a closure inside this netns, passing the "original" netns to it
+	// so the closure can move devices back.
 	Do(toRun func(hostNS NetNS) error) error
-	// Close 释放句柄
+	// Close releases the handle
 	Close() error
 }
 
@@ -42,8 +42,8 @@ type netNS struct {
 	mu     sync.Mutex
 }
 
-// GetNS 通过路径打开一个 netns。
-// 容器运行时给 CNI 的 CNI_NETNS 通常是 /proc/<pid>/ns/net 或 /var/run/netns/<name>。
+// GetNS opens a netns by path.
+// The CNI_NETNS that container runtimes pass to CNI is usually /proc/<pid>/ns/net or /var/run/netns/<name>.
 func GetNS(path string) (NetNS, error) {
 	handle, err := netns.GetFromPath(path)
 	if err != nil {
@@ -52,9 +52,9 @@ func GetNS(path string) (NetNS, error) {
 	return &netNS{handle: handle, path: path}, nil
 }
 
-// GetCurrentNS 获取当前**线程**所在的 netns。
-// 注意用的是 /proc/self/task/<tid>/ns/net 而不是 /proc/self/ns/net —— 后者
-// 拿到的是进程主线程的 netns，在多线程场景里会取错。
+// GetCurrentNS returns the netns of the current **thread**.
+// Note it uses /proc/self/task/<tid>/ns/net rather than /proc/self/ns/net -- the latter
+// returns the netns of the process main thread, which is wrong in multi-threaded scenarios.
 func GetCurrentNS() (NetNS, error) {
 	path := fmt.Sprintf("/proc/%d/task/%d/ns/net", os.Getpid(), unix.Gettid())
 	return GetNS(path)
@@ -78,14 +78,14 @@ func (n *netNS) Set() error {
 	return nil
 }
 
-// Do 在目标 netns 里执行闭包。
+// Do runs a closure in the target netns.
 //
-// 实现要点：
-//  1. 先在主 goroutine 里抓一份"当前 netns"的句柄（hostNS）；
-//  2. 真正的切换放在一个新的 goroutine 里做，并且先 LockOSThread；
-//  3. 闭包执行完必须先成功切回来，才 UnlockOSThread。
-//     —— 如果切回失败，就故意**不解锁**，让 Go 运行时把这条线程整个丢掉，
-//     避免一个"netns 脏了"的线程被复用给别的 goroutine。
+// Key points of the implementation:
+//  1. In the main goroutine, first grab a handle to the "current netns" (hostNS);
+//  2. Do the actual switch in a new goroutine, calling LockOSThread first;
+//  3. Only call UnlockOSThread after successfully switching back once the closure finishes.
+//     -- If switching back fails, deliberately **do not unlock**, so the Go runtime discards the whole thread
+//     and a thread with a "dirty netns" is never reused by another goroutine.
 func (n *netNS) Do(toRun func(hostNS NetNS) error) error {
 	if err := n.errorIfClosed(); err != nil {
 		return err
@@ -112,7 +112,7 @@ func (n *netNS) Do(toRun func(hostNS NetNS) error) error {
 		n.mu.Unlock()
 
 		defer func() {
-			// 只有成功切回原 netns，才允许释放这条线程
+			// Only allow releasing this thread after successfully switching back to the original netns
 			if err := netns.Set(threadNS.(*netNS).handle); err == nil {
 				runtime.UnlockOSThread()
 			}
@@ -121,7 +121,7 @@ func (n *netNS) Do(toRun func(hostNS NetNS) error) error {
 		return toRun(hostNS)
 	}
 
-	// 主 goroutine：保存当前 netns
+	// Main goroutine: save the current netns
 	hostNS, err := GetCurrentNS()
 	if err != nil {
 		return fmt.Errorf("ns: cannot open current netns: %v", err)

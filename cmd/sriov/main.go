@@ -1,20 +1,20 @@
 //go:build linux
 // +build linux
 
-// sriov-cni 是一个最小但可运行的 SR-IOV CNI 插件。
+// sriov-cni is a minimal but working SR-IOV CNI plugin.
 //
-// 它与普通 CNI 的根本区别：
+// The fundamental difference from ordinary CNI plugins:
 //
-//	bridge/ptp  :  "造"一张网卡（veth pair）→ 塞进 Pod netns → 配 IP
-//	sriov       :  "接管"一块真实 PCIe 设备（VF）→ 刷硬件属性 → 搬进 Pod netns → 配 IP
+//	bridge/ptp  :  "create" a NIC (veth pair) → put it into the Pod netns → configure IP
+//	sriov       :  "take over" a real PCIe device (VF) → program hardware attributes → move into the Pod netns → configure IP
 //
-// 因此它依赖外部组件告诉它"这块 VF 归这个 Pod"：
+// It therefore relies on external components to tell it "this VF belongs to this Pod":
 //
-//	SR-IOV Device Plugin（kubelet 侧分配资源）
+//	SR-IOV Device Plugin (resource allocation on the kubelet side)
 //	        ↓  Pod spec: resources.limits[intel.com/intel_sriov_netdevice]=1
-//	Multus（读 PodResources API 拿到 PCI 地址，注入 deviceID）
+//	Multus (reads the PodResources API to get the PCI address, injects deviceID)
 //	        ↓  {"deviceID":"0000:03:02.0", "vlan":1000, "ipam":{...}}
-//	sriov-cni（本插件）
+//	sriov-cni (this plugin)
 package main
 
 import (
@@ -42,8 +42,8 @@ import (
 )
 
 func init() {
-	// 切换 netns 的 setns(2) 只对调用线程生效，
-	// 因此整个进程必须锁死在一条 OS 线程上。
+	// setns(2), used to switch netns, only affects the calling thread,
+	// so the whole process must be pinned to a single OS thread.
 	runtime.LockOSThread()
 }
 
@@ -51,10 +51,10 @@ func main() {
 	skel.PluginMain(cmdAdd, cmdCheck, cmdDel, version.All, "CNI sriov plugin v0.1.0")
 }
 
-// cmdAdd 处理 CNI ADD。两种运行模式：
+// cmdAdd handles CNI ADD. Two modes of operation:
 //
-//	multus  : Multus 按 NAD 调用本插件，直接接管一块 VF（addVF）
-//	chained : 本插件跟在主 CNI 之后，自己读 Pod 注解，再接管 VF 并把结果拼到 prevResult 上
+//	multus  : Multus calls this plugin per NAD and it takes over one VF directly (addVF)
+//	chained : this plugin runs after the primary CNI, reads Pod annotations itself, takes over the VF and appends the result to prevResult
 func cmdAdd(args *skel.CmdArgs) error {
 	conf, err := config.LoadConf(args.StdinData)
 	if err != nil {
@@ -74,12 +74,12 @@ func cmdAdd(args *skel.CmdArgs) error {
 	return types.PrintResult(result, conf.CNIVersion)
 }
 
-// cmdAddChained 是 chained 模式的 ADD：
+// cmdAddChained implements ADD in chained mode:
 //
-//	prevResult（主 CNI 已建好 eth0）
-//	  → 读 Pod 注解 → 没有注解：原样透传 prevResult，普通 Pod 不受影响
-//	  → 有注解：查 networks 表 → 合并配置 → addVF(ifName=net1)
-//	  → 把 net1 的接口/IP/路由拼到 prevResult 后面返回
+//	prevResult (primary CNI has already set up eth0)
+//	  → read Pod annotations → no annotation: pass prevResult through unchanged, ordinary Pods are unaffected
+//	  → annotation present: look up the networks table → merge config → addVF(ifName=net1)
+//	  → append the net1 interface/IP/routes to prevResult and return it
 func cmdAddChained(args *skel.CmdArgs, base *config.NetConf) error {
 	if base.PrevResult == nil {
 		return fmt.Errorf("sriov: mode=chained must run after another plugin in a conflist (no prevResult)")
@@ -130,8 +130,8 @@ func cmdAddChained(args *skel.CmdArgs, base *config.NetConf) error {
 	return types.PrintResult(chain.Append(prev, sec), conf.CNIVersion)
 }
 
-// resolveDevice 按 vfAllocator 决定本次使用哪块 VF，结果写进 conf.DeviceID。
-// 已经有 deviceID（Multus 注入或配置写死）时直接沿用。
+// resolveDevice decides which VF to use based on vfAllocator and writes it to conf.DeviceID.
+// If a deviceID already exists (injected by Multus or hard-coded in config), it is used as is.
 func resolveDevice(args *skel.CmdArgs, conf *config.NetConf) error {
 	if conf.DeviceID != "" {
 		return nil
@@ -171,41 +171,41 @@ func resolveDevice(args *skel.CmdArgs, conf *config.NetConf) error {
 	return conf.Validate()
 }
 
-// addVF 接管一块 VF 并把接口/IP/路由写进 result。
+// addVF takes over a VF and writes the interface/IP/routes into result.
 //
-// 完整时序：
+// Full sequence:
 //
-//	定位 VF(podresources/pool/注入) → 定位 VF(netdev/PF/vfID)
-//	        → 保存 VF 原始硬件状态（供 DEL 还原）
+//	locate VF (podresources/pool/injected) → locate VF (netdev/PF/vfID)
+//	        → save original VF hardware state (for restoring on DEL)
 //	        → [host netns] down + spoofchk + MAC + VLAN + trust + link-state
-//	        → 把 VF netdev 搬进 Pod netns
-//	        → [pod  netns] 改名 → MTU → up
-//	        → 调 IPAM 拿 IP/路由 → 下发地址 + 路由（含策略路由）
+//	        → move the VF netdev into the Pod netns
+//	        → [pod  netns] rename → MTU → up
+//	        → call IPAM to get IP/routes → apply addresses + routes (including policy routing)
 func addVF(args *skel.CmdArgs, conf *config.NetConf, result *types100.Result) (err error) {
-	// ---------- 1. 确定本次使用哪块 VF ----------
+	// ---------- 1. Decide which VF to use ----------
 	if err = resolveDevice(args, conf); err != nil {
 		return err
 	}
-	// pool 模式下如果后面任何一步失败，要把 VF 还给池子。
+	// In pool mode, if any later step fails, the VF must be returned to the pool.
 	defer func() {
 		if err != nil && conf.VFAllocator == config.AllocPool {
 			_ = pool.Release(conf.Pool, conf.DeviceID, pool.Owner(args.ContainerID, args.IfName))
 		}
 	}()
 
-	// ---------- 2. 定位 VF ----------
+	// ---------- 2. Locate the VF ----------
 	vfInfo, err := sriov.GetVFInfo(conf)
 	if err != nil {
 		return err
 	}
-	// 把推算结果回填，DEL 时即使配置里没写也能找到设备
+	// Write the derived values back so DEL can find the device even if the config does not specify them
 	conf.DeviceID, conf.PFBDF = vfInfo.DeviceID, vfInfo.PFBDF
 	conf.PFName, conf.VFID, conf.Netdev = vfInfo.PFName, vfInfo.VFID, vfInfo.Netdev
 
 	logging.Infof("ADD: %s -> container=%s iface=%s netns=%s",
 		vfInfo, args.ContainerID, args.IfName, args.Netns)
 
-	// ---------- 3. 保存原始状态 ----------
+	// ---------- 3. Save original state ----------
 	origState, err := sriov.SaveOrigVfState(vfInfo)
 	if err != nil {
 		return err
@@ -213,8 +213,8 @@ func addVF(args *skel.CmdArgs, conf *config.NetConf, result *types100.Result) (e
 	conf.OrigVfState = origState
 
 	ipamDone := false
-	// 失败回滚：任何一种 ADD 失败都要把 VF 干净地还回去，
-	// 否则这个 VF 会带着半个配置卡住，后续 Pod 分到它就会出诡异故障。
+	// Rollback on failure: any ADD failure must hand the VF back cleanly,
+	// otherwise the VF stays half-configured and later Pods that get it will see strange failures.
 	defer func() {
 		if err == nil {
 			return
@@ -242,23 +242,23 @@ func addVF(args *skel.CmdArgs, conf *config.NetConf, result *types100.Result) (e
 		}
 		defer targetNS.Close()
 
-		// ---------- 4. 刷 VF 硬件属性（还在 host netns） ----------
+		// ---------- 4. Program VF hardware attributes (still in host netns) ----------
 		if err = sriov.ConfigureVFHardware(vfInfo, conf); err != nil {
 			return err
 		}
 
-		// ---------- 5. 搬进 Pod netns ----------
+		// ---------- 5. Move into the Pod netns ----------
 		if err = sriov.MoveVFToNetns(vfInfo, int(targetNS.Fd())); err != nil {
 			return err
 		}
 	} else {
-		// DPDK 模式：VF 已被 vfio-pci 绑定，没有 netdev 可搬。
-		// 只需要在结果里回传 PCI 地址，让上层的 device plugin 把
-		// /dev/vfio/<n> 挂进容器即可。
+		// DPDK mode: the VF is bound to vfio-pci, so there is no netdev to move.
+		// Just return the PCI address in the result so the upstream device plugin can
+		// mount /dev/vfio/<n> into the container.
 		logging.Infof("DPDK mode: VF %s stays bound to vfio-pci", vfInfo.DeviceID)
 	}
 
-	// ---------- 6. IPAM：分配 IP ----------
+	// ---------- 6. IPAM: allocate IP ----------
 	if conf.IPAM.Type != "" {
 		ipamRes, e := ipam.ExecAdd(conf.IPAM.Type, args.StdinData)
 		if e != nil {
@@ -270,7 +270,7 @@ func addVF(args *skel.CmdArgs, conf *config.NetConf, result *types100.Result) (e
 		result.DNS = ipamRes.DNS
 	}
 
-	// ---------- 7. 进入 Pod netns 完成收尾 ----------
+	// ---------- 7. Enter the Pod netns and finish up ----------
 	if !conf.DPDKMode {
 		if err = targetNS.Do(func(_ ns.NetNS) error {
 			return finalizeInContainer(args, vfInfo, conf, result)
@@ -290,7 +290,7 @@ func addVF(args *skel.CmdArgs, conf *config.NetConf, result *types100.Result) (e
 		}
 	}
 
-	// ---------- 8. 落盘缓存（DEL 需要） ----------
+	// ---------- 8. Persist cache (needed by DEL) ----------
 	conf.StdinData = args.StdinData
 	if err2 := config.SaveCachedConf(conf.ContainerID, conf.DeviceID, args.IfName, conf); err2 != nil {
 		logging.Warnf("cannot save cached conf: %v", err2)
@@ -300,14 +300,14 @@ func addVF(args *skel.CmdArgs, conf *config.NetConf, result *types100.Result) (e
 	return nil
 }
 
-// finalizeInContainer 在 Pod netns 内执行：改名、MTU、up、下发 IP。
+// finalizeInContainer runs inside the Pod netns: rename, MTU, up, apply IP.
 func finalizeInContainer(args *skel.CmdArgs, vfInfo *sriov.VFInfo,
 	conf *config.NetConf, result *types100.Result) error {
 
 	name := vfInfo.Netdev
 	link, err := netlink.LinkByName(name)
 	if err != nil {
-		// 极端情况：搬进来时名字冲突，内核自动加了后缀。用 MAC 兜底找。
+		// Edge case: on a name collision when moving in, the kernel appended a suffix. Fall back to finding it by MAC.
 		if name, err = findLinkByMAC(conf.MAC); err != nil {
 			return err
 		}
@@ -316,7 +316,7 @@ func finalizeInContainer(args *skel.CmdArgs, vfInfo *sriov.VFInfo,
 		}
 	}
 
-	// 改名必须在 down 状态下做（内核 dev_change_name 对 UP 设备返回 EBUSY）。
+	// Renaming must be done while the link is down (kernel dev_change_name returns EBUSY for UP devices).
 	if name != args.IfName {
 		if err = netlink.LinkSetDown(link); err != nil {
 			return fmt.Errorf("sriov: down %s before rename: %v", name, err)
@@ -337,7 +337,7 @@ func finalizeInContainer(args *skel.CmdArgs, vfInfo *sriov.VFInfo,
 		return fmt.Errorf("sriov: set %s up: %v", args.IfName, err)
 	}
 
-	// 回填 CNI Result 的 interfaces 段
+	// Fill in the interfaces section of the CNI Result
 	ifIndex := len(result.Interfaces)
 	result.Interfaces = append(result.Interfaces, &types100.Interface{
 		Name:    args.IfName,
@@ -354,7 +354,7 @@ func finalizeInContainer(args *skel.CmdArgs, vfInfo *sriov.VFInfo,
 	return ipam.ConfigureIface(args.IfName, result)
 }
 
-// cmdDel 处理 CNI DEL：归还 IP、把 VF 搬回 host 并还原硬件属性。
+// cmdDel handles CNI DEL: release the IP, move the VF back to the host and restore hardware attributes.
 func cmdDel(args *skel.CmdArgs) error {
 	conf, err := config.LoadConf(args.StdinData)
 	if err != nil {
@@ -365,24 +365,24 @@ func cmdDel(args *skel.CmdArgs) error {
 
 	chained := conf.Mode == config.ModeChained
 	if chained {
-		// chained 模式下 runtime 传的 IfName 是主网卡 eth0，副网卡要换成 net1。
+		// In chained mode the runtime passes the primary NIC eth0 as IfName; the secondary NIC must be net1.
 		sub := *args
 		sub.IfName = conf.SecondaryIfNameOrDefault()
 		args = &sub
 	}
 
-	// DEL 时 runtime 传进来的配置通常不含 deviceID，
-	// 优先用 ADD 时落盘的缓存补齐。
+	// The config passed by the runtime on DEL usually has no deviceID,
+	// so prefer filling it in from the cache persisted at ADD time.
 	if cached, e := config.LoadCachedConf(conf.ContainerID, conf.DeviceID, args.IfName); e == nil {
 		mergeCached(conf, cached)
 		if chained && len(cached.StdinData) > 0 {
-			// 用 ADD 时合并后的配置归还 IP，而不是未合并的 conflist。
+			// Release the IP using the merged config from ADD, not the unmerged conflist.
 			sub := *args
 			sub.StdinData = cached.StdinData
 			args = &sub
 		}
 	} else if chained {
-		// 没缓存 = 这个 Pod 当初没挂副网卡（或已清理），DEL 必须幂等。
+		// No cache = this Pod never had a secondary NIC (or it was already cleaned up); DEL must be idempotent.
 		logging.Debugf("chained DEL: nothing cached for %s/%s, skip", conf.ContainerID, args.IfName)
 		return nil
 	} else {
@@ -393,14 +393,14 @@ func cmdDel(args *skel.CmdArgs) error {
 		return fmt.Errorf("sriov: DEL without deviceID, cannot locate the VF")
 	}
 
-	// 1) 归还 IP（先做：IPAM 不依赖 netns，且失败概率更低）
+	// 1) Release the IP (first: IPAM does not depend on netns and is less likely to fail)
 	if conf.IPAM.Type != "" {
 		if e := ipam.ExecDel(conf.IPAM.Type, args.StdinData); e != nil {
 			logging.Warnf("ipam DEL failed: %v", e)
 		}
 	}
 
-	// 2) 把 VF 搬回 host 并还原
+	// 2) Move the VF back to the host and restore it
 	vfInfo, err := sriov.GetVFInfo(conf)
 	if err != nil {
 		return err
@@ -419,7 +419,7 @@ func cmdDel(args *skel.CmdArgs) error {
 	return nil
 }
 
-// mergeCached 用缓存里的关键信息补齐当前配置。
+// mergeCached fills in the current config with key information from the cache.
 func mergeCached(conf, cached *config.NetConf) {
 	if conf.DeviceID == "" {
 		conf.DeviceID = cached.DeviceID
@@ -442,7 +442,7 @@ func mergeCached(conf, cached *config.NetConf) {
 	if conf.MAC == "" {
 		conf.MAC = cached.MAC
 	}
-	// 来源和池配置以 ADD 时的为准（chained 模式下 stdin 里没有合并后的网络覆盖项）。
+	// Source and pool config follow what was used at ADD time (in chained mode stdin has no merged network overrides).
 	if cached.VFAllocator != "" {
 		conf.VFAllocator = cached.VFAllocator
 		conf.Pool = cached.Pool
@@ -452,7 +452,7 @@ func mergeCached(conf, cached *config.NetConf) {
 	}
 }
 
-// cmdCheck 处理 CNI CHECK：确认 VF 仍在 Pod netns 且配置正确。
+// cmdCheck handles CNI CHECK: verify the VF is still in the Pod netns and correctly configured.
 func cmdCheck(args *skel.CmdArgs) error {
 	conf, err := config.LoadConf(args.StdinData)
 	if err != nil {
@@ -466,7 +466,7 @@ func cmdCheck(args *skel.CmdArgs) error {
 		args = &sub
 		cached, e := config.LoadCachedConf(args.ContainerID, "", args.IfName)
 		if e != nil {
-			return nil // 这个 Pod 没挂副网卡
+			return nil // this Pod has no secondary NIC
 		}
 		conf.MAC = cached.MAC
 	}
@@ -485,11 +485,11 @@ func cmdCheck(args *skel.CmdArgs) error {
 	})
 }
 
-// releaseVFToHost 把 VF 从 Pod netns 搬回 host netns 并还原配置。
+// releaseVFToHost moves the VF from the Pod netns back to the host netns and restores its config.
 //
-// 注意一个内核行为：如果 Pod 的 netns 已经被销毁（Pod 被强杀），
-// 内核会自动把里面的 netdev 送回 init netns（宿主）。所以这里对
-// "netns 不存在" 的情况是容错的 —— 直接在 host 上找即可。
+// Note a kernel behavior: if the Pod netns has already been destroyed (Pod force-killed),
+// the kernel automatically returns the netdevs inside to the init netns (host). So this
+// tolerates a missing netns: just look the device up on the host.
 func releaseVFToHost(args *skel.CmdArgs, vfInfo *sriov.VFInfo, conf *config.NetConf) (err error) {
 	if args.Netns != "" {
 		if _, statErr := os.Stat(args.Netns); statErr == nil {
@@ -507,7 +507,7 @@ func releaseVFToHost(args *skel.CmdArgs, vfInfo *sriov.VFInfo, conf *config.NetC
 		}
 	}
 
-	// 回到 host netns，按 PCI 地址重新定位 netdev（名字可能被改过）
+	// Back in the host netns, re-locate the netdev by PCI address (the name may have been changed)
 	netdev, err := sriov.GetNetdevByPci(vfInfo.DeviceID)
 	if err != nil {
 		return err
@@ -522,7 +522,7 @@ func releaseVFToHost(args *skel.CmdArgs, vfInfo *sriov.VFInfo, conf *config.NetC
 	return sriov.ResetVFHardware(&hostInfo, conf.OrigVfState)
 }
 
-// findLinkByMAC 在当前 netns 里按 MAC 找 netdev 名。
+// findLinkByMAC finds a netdev name by MAC in the current netns.
 func findLinkByMAC(mac string) (string, error) {
 	if mac == "" {
 		return "", fmt.Errorf("sriov: cannot locate VF netdev: no mac hint")

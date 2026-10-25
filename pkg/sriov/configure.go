@@ -13,9 +13,9 @@ import (
 	"github.com/example/sriov-cni/pkg/logging"
 )
 
-// getLinkByName 通过 LinkList 查找网卡。
-// 不用 netlink.LinkByName 是因为 VF 信息（Attrs().Vfs）只在
-// 完整的 link dump（RTM_GETLINK 带 IFLA_VFINFO）里返回。
+// getLinkByName looks up a link via LinkList.
+// netlink.LinkByName is not used because VF info (Attrs().Vfs) is only returned in
+// a full link dump (RTM_GETLINK with IFLA_VFINFO).
 func getLinkByName(name string) (netlink.Link, error) {
 	links, err := netlink.LinkList()
 	if err != nil {
@@ -29,7 +29,7 @@ func getLinkByName(name string) (netlink.Link, error) {
 	return nil, fmt.Errorf("link %s not found", name)
 }
 
-// SaveOrigVfState 采集 VF 被接管前的状态，用于 DEL 时还原。
+// SaveOrigVfState captures the VF state before takeover so DEL can restore it.
 func SaveOrigVfState(info *VFInfo) (*config.VfState, error) {
 	vfLink, err := getLinkByName(info.Netdev)
 	if err != nil {
@@ -64,13 +64,13 @@ func SaveOrigVfState(info *VFInfo) (*config.VfState, error) {
 	return state, nil
 }
 
-// ConfigureVFHardware 在 host netns 里把 VF 的硬件属性刷成配置要求的值。
+// ConfigureVFHardware sets the VF hardware attributes to the configured values in the host netns.
 //
-// 顺序是有讲究的：
-//  1. 先 down —— 多数驱动（iavf/ice/i40e）不允许在 up 状态改 MAC；
-//  2. 再关 spoofchk —— 否则后续设置 MAC 会被硬件拒绝；
-//  3. 然后 MAC / VLAN / trust / link-state / rate；
-//  4. 最后才把 netdev 搬进 Pod netns（由调用方完成）。
+// The order matters:
+//  1. Bring it down first -- most drivers (iavf/ice/i40e) do not allow changing the MAC while up;
+//  2. Then disable spoofchk -- otherwise setting the MAC afterwards is rejected by the hardware;
+//  3. Then MAC / VLAN / trust / link-state / rate;
+//  4. Only at the end move the netdev into the Pod netns (done by the caller).
 func ConfigureVFHardware(info *VFInfo, conf *config.NetConf) error {
 	vfLink, err := getLinkByName(info.Netdev)
 	if err != nil {
@@ -89,7 +89,7 @@ func ConfigureVFHardware(info *VFInfo, conf *config.NetConf) error {
 		return fmt.Errorf("sriov: failed to set VF %s down: %v", info.Netdev, err)
 	}
 
-	// 2) spoofchk —— 只有在打算改 MAC / 要求放开伪造时才动它
+	// 2) spoofchk -- only touched when changing the MAC or when spoofing must be allowed
 	if conf.SpoofChk != "" {
 		val, err := config.ParseOnOff("spoofchk", conf.SpoofChk)
 		if err != nil {
@@ -101,8 +101,8 @@ func ConfigureVFHardware(info *VFInfo, conf *config.NetConf) error {
 		logging.Debugf("vf %d spoofchk=%v", info.VFID, val)
 	}
 
-	// 3) MAC —— 优先用 PF 的 IFLA_VF_MAC（对 mlx5/i40e/ice 都通用），
-	//    失败时退回直接改 VF netdev 的 MAC。
+	// 3) MAC -- prefer the PF's IFLA_VF_MAC (works for mlx5/i40e/ice),
+	//    and fall back to changing the VF netdev's MAC directly on failure.
 	if conf.MAC != "" {
 		hwaddr, err := net.ParseMAC(conf.MAC)
 		if err != nil {
@@ -117,7 +117,7 @@ func ConfigureVFHardware(info *VFInfo, conf *config.NetConf) error {
 		logging.Debugf("vf %d mac=%s", info.VFID, conf.MAC)
 	}
 
-	// 4) VLAN —— 由网卡硬件打/剥 tag，Pod 里看到的是 untagged 流量
+	// 4) VLAN -- the NIC hardware adds/strips the tag; the Pod sees untagged traffic
 	if conf.Vlan != 0 {
 		if err := netlink.LinkSetVfVlanQos(pfLink, info.VFID, conf.Vlan, conf.VlanQoS); err != nil {
 			return fmt.Errorf("sriov: failed to set vlan %d (qos %d) on VF %d: %v",
@@ -126,7 +126,7 @@ func ConfigureVFHardware(info *VFInfo, conf *config.NetConf) error {
 		logging.Debugf("vf %d vlan=%d qos=%d", info.VFID, conf.Vlan, conf.VlanQoS)
 	}
 
-	// 5) trust —— 只有可信 VF 才能开混杂、加多播、改 MAC
+	// 5) trust -- only trusted VFs may enable promiscuous mode, add multicast, or change the MAC
 	if conf.Trust != "" {
 		val, err := config.ParseOnOff("trust", conf.Trust)
 		if err != nil {
@@ -151,7 +151,7 @@ func ConfigureVFHardware(info *VFInfo, conf *config.NetConf) error {
 		logging.Debugf("vf %d link_state=%s", info.VFID, conf.LinkState)
 	}
 
-	// 7) 限速（Mbps）。驱动不支持时会报 EOPNOTSUPP，降级为警告而不是失败。
+	// 7) Rate limit (Mbps). Drivers without support return EOPNOTSUPP, which is downgraded to a warning instead of a failure.
 	if conf.MaxTxRate != 0 || conf.MinTxRate != 0 {
 		if err := netlink.LinkSetVfRate(pfLink, info.VFID, conf.MinTxRate, conf.MaxTxRate); err != nil {
 			logging.Warnf("failed to set tx rate on VF %d: %v", info.VFID, err)
@@ -161,8 +161,8 @@ func ConfigureVFHardware(info *VFInfo, conf *config.NetConf) error {
 	return nil
 }
 
-// ResetVFHardware 把 VF 恢复成 orig 描述的状态。
-// 只在 VF 已经回到 host netns 之后调用。
+// ResetVFHardware restores the VF to the state described by orig.
+// Call it only after the VF has returned to the host netns.
 func ResetVFHardware(info *VFInfo, orig *config.VfState) error {
 	if orig == nil {
 		return nil
@@ -170,7 +170,7 @@ func ResetVFHardware(info *VFInfo, orig *config.VfState) error {
 
 	vfLink, err := getLinkByName(info.Netdev)
 	if err != nil {
-		// VF  netdev 名字在搬回 host 时可能冲突而被改名，尝试用原名字再找一次
+		// The VF netdev name may collide and be renamed when moved back to the host; retry with the original name
 		if vfLink, err = getLinkByName(orig.HostIFName); err != nil {
 			return fmt.Errorf("sriov: cannot find VF netdev on host for reset: %v", err)
 		}
@@ -210,14 +210,14 @@ func ResetVFHardware(info *VFInfo, orig *config.VfState) error {
 		}
 	}
 
-	// 改回原来的 netdev 名，避免下次分配时名字漂移
+	// Restore the original netdev name to avoid name drift on the next allocation
 	if vfLink.Attrs().Name != orig.HostIFName {
 		if err := netlink.LinkSetName(vfLink, orig.HostIFName); err != nil {
 			logging.Warnf("cannot restore VF netdev name to %s: %v", orig.HostIFName, err)
 		}
 	}
 
-	// 恢复原来的 up/down 状态
+	// Restore the original up/down state
 	if orig.LinkUp {
 		if err := netlink.LinkSetUp(vfLink); err != nil {
 			logging.Warnf("cannot set VF %s up during reset: %v", vfLink.Attrs().Name, err)
@@ -229,10 +229,10 @@ func ResetVFHardware(info *VFInfo, orig *config.VfState) error {
 	return nil
 }
 
-// MoveVFToNetns 把 VF netdev 搬进目标 netns（Pod 的网络命名空间）。
+// MoveVFToNetns moves the VF netdev into the target netns (the Pod's network namespace).
 //
-// 这是 SR-IOV 直通的"最后一公里"：搬进去之后，Pod 里的进程就能
-// 直接 mmap VF 的队列、收发包绕过 host 内核协议栈。
+// This is the "last mile" of SR-IOV passthrough: once moved in, processes in the Pod can
+// mmap the VF queues directly and send/receive packets bypassing the host kernel stack.
 func MoveVFToNetns(info *VFInfo, netnsFd int) error {
 	vfLink, err := getLinkByName(info.Netdev)
 	if err != nil {
@@ -245,13 +245,13 @@ func MoveVFToNetns(info *VFInfo, netnsFd int) error {
 	return nil
 }
 
-// MoveVFToHostNetns 在 Pod netns 内部执行，把 VF 搬回 host netns。
+// MoveVFToHostNetns runs inside the Pod netns and moves the VF back to the host netns.
 func MoveVFToHostNetns(netdevName string, hostNetnsFd int) error {
 	vfLink, err := getLinkByName(netdevName)
 	if err != nil {
 		return fmt.Errorf("sriov: find %s in container netns: %v", netdevName, err)
 	}
-	// 先把残留的 IP 地址清掉，防止回到 host 后污染主机路由表
+	// Clear leftover IP addresses first so they do not pollute the host routing table after the move
 	if addrs, err := netlink.AddrList(vfLink, netlink.FAMILY_ALL); err == nil {
 		for _, a := range addrs {
 			if err := netlink.AddrDel(vfLink, &a); err != nil {
@@ -268,7 +268,7 @@ func MoveVFToHostNetns(netdevName string, hostNetnsFd int) error {
 	return nil
 }
 
-// VerifyVF 是 CNI CHECK 的实现：确认 VF 还在 Pod netns 里、MAC 正确、状态 up。
+// VerifyVF implements CNI CHECK: confirm the VF is still in the Pod netns, the MAC is correct, and the state is up.
 func VerifyVF(ifName, expectMAC string) error {
 	link, err := getLinkByName(ifName)
 	if err != nil {

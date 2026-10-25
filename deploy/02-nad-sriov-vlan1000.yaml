@@ -1,11 +1,11 @@
-# NetworkAttachmentDefinition：定义 Pod 的"第二张网络"
+# NetworkAttachmentDefinition: defines the Pod's "second network"
 #
-# ★ 关键注解 k8s.v1.cni.cncf.io/resourceName：
-#   Multus 据此去 kubelet 的 PodResources API 查这个 Pod 分到了哪个 VF，
-#   然后把 PCI 地址注入下面的 config 作为 deviceID，再调用 sriov-cni。
+# * Key annotation k8s.v1.cni.cncf.io/resourceName:
+#   Multus uses it to query the kubelet PodResources API for the VF assigned to this Pod,
+#   injects the PCI address into the config below as deviceID, then calls sriov-cni.
 #
-# 注意：config 里不要写死 deviceID —— 那是用来做单 Pod 固定分配的测试手段，
-#       生产环境会被 Multus 覆盖，写死反而可能导致两个 Pod 抢同一块 VF。
+# Note: do not hardcode deviceID in config -- that is a test trick for pinning a single Pod,
+#       Multus overrides it in production, and hardcoding may make two Pods fight over the same VF.
 apiVersion: k8s.cni.cncf.io/v1
 kind: NetworkAttachmentDefinition
 metadata:
@@ -37,15 +37,15 @@ spec:
       }
     }
 ---
-# 变体：走策略路由，让"源地址是 192.168.100.x 的流量"走 net1
+# Variant: policy routing, so traffic whose source address is 192.168.100.x goes out net1
 #
-#   "gateway" 留空 → 不往 main 表加默认路由（eth0 的默认路由保留）
-#   routes 带 "table": 100 → 插件自动下发
-#       ip rule add from <本 Pod 的 net1 IP> table 100 pref 1100
+#   Leave "gateway" empty -> no default route added to the main table (eth0 keeps its default route)
+#   Routes with "table": 100 -> the plugin installs automatically:
+#       ip rule add from <this Pod's net1 IP> table 100 pref 1100
 #
-# 效果：
-#   默认出网        → eth0（集群网络、Service、DNS 正常）
-#   bind(192.168.100.x) → net1（物理网络直通）
+# Effect:
+#   Default egress      -> eth0 (cluster network, Service, DNS work normally)
+#   bind(192.168.100.x) -> net1 (direct path to the physical network)
 apiVersion: k8s.cni.cncf.io/v1
 kind: NetworkAttachmentDefinition
 metadata:

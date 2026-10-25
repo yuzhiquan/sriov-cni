@@ -5,6 +5,6 @@ package config
 
 import "regexp"
 
-// pciAddrRe 匹配 SR-IOV VF 的地址格式：Domain:Bus:Device.Function
-// 例如 0000:03:02.0（Function 因为 ARI 可以到 255，所以不固定为 0.7）
+// pciAddrRe matches the SR-IOV VF address format: Domain:Bus:Device.Function
+// e.g. 0000:03:02.0 (Function can go up to 255 with ARI, so it is not fixed to 0.7)
 var pciAddrRe = regexp.MustCompile(`^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-9a-fA-F]{1,2}$`)

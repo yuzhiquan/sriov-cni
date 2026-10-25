@@ -1,8 +1,8 @@
 //go:build linux
 // +build linux
 
-// Package logging 是一个极简日志器，避免引入第三方依赖。
-// CNI 插件要求把诊断信息打到 stderr（kubelet / containerd 会捕获）。
+// Package logging is a minimal logger that avoids third-party dependencies.
+// CNI plugins must write diagnostics to stderr (captured by kubelet / containerd).
 package logging
 
 import (
@@ -25,7 +25,7 @@ var (
 	level  = LevelError
 )
 
-// Set 设置日志级别与输出文件。
+// Set sets the log level and output file.
 func Set(logLevel, logFile string) {
 	if logLevel == "" {
 		return
@@ -51,7 +51,7 @@ func Set(logLevel, logFile string) {
 		}
 		var w io.Writer = f
 		if level >= LevelDebug {
-			// 同时保留 stderr，方便 kubectl 侧排错
+			// Also keep stderr to ease troubleshooting from the kubectl side
 			w = io.MultiWriter(os.Stderr, f)
 		}
 		logger.SetOutput(w)

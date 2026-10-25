@@ -1,5 +1,5 @@
 {
-  "_comment": "chained 模式 + pool：不需要 Device Plugin，由 CNI 自己从 ens1f0 下的 VF 里分配。代价：调度器看不到 VF 数量，用完时 Pod 会在 CNI ADD 阶段失败。",
+  "_comment": "chained mode + pool: no Device Plugin needed; the CNI allocates VFs itself from those under ens1f0. Trade-off: the scheduler cannot see VF counts, so when the pool is exhausted Pods fail at CNI ADD.",
   "name": "k8s-pod-network",
   "cniVersion": "1.0.0",
   "plugins": [

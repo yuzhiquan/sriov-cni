@@ -11,7 +11,7 @@ import (
 	"github.com/example/sriov-cni/pkg/config"
 )
 
-// fakeSysfs 搭一棵假的 PCI 拓扑树，模拟：
+// fakeSysfs builds a fake PCI topology tree that simulates:
 //
 //	0000:03:00.0   PF  (netdev: ens1f0)
 //	  ├── virtfn0 -> 0000:03:02.0  (netdev: ens1f0v0)
@@ -81,7 +81,7 @@ func TestGetVFInfoNotAVF(t *testing.T) {
 	sysBusPci = root
 	defer func() { sysBusPci = orig }()
 
-	// PF 自己没有 physfn，应当报错
+	// A PF has no physfn itself, so this should return an error
 	if _, err := GetVFInfo(&config.NetConf{DeviceID: "0000:03:00.0"}); err == nil {
 		t.Errorf("expect error when device is a PF, got nil")
 	}

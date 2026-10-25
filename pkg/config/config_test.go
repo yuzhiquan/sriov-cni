@@ -51,7 +51,7 @@ func TestValidateAfterResolve(t *testing.T) {
 }
 
 func TestCachePathWildcardWhenDeviceUnknown(t *testing.T) {
-	// 仅验证拼接逻辑不会 panic、且 deviceID 已知时不走通配
+	// Only verify that path joining does not panic and that no wildcard is used when deviceID is known
 	if p, err := resolveCachePath("cid", "0000:03:02.0", "net1"); err != nil || p == "" {
 		t.Errorf("known device: %q %v", p, err)
 	}

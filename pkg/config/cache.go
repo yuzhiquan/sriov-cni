@@ -11,11 +11,11 @@ import (
 	"strings"
 )
 
-// CacheDir 保存每个 Pod 接管 VF 时的原始状态。
-// 名称与上游 sriov-cni 保持一致，便于混用排查。
+// CacheDir stores the original state of each VF when a Pod takes it over.
+// The name matches upstream sriov-cni to ease troubleshooting when mixing both.
 const CacheDir = "/var/lib/cni/sriov"
 
-// SaveCachedConf 把（含 OrigVfState 的）配置落盘，供 DEL 使用。
+// SaveCachedConf persists the config (including OrigVfState) to disk for use by DEL.
 func SaveCachedConf(containerID, deviceID, ifName string, conf *NetConf) error {
 	if err := os.MkdirAll(CacheDir, 0700); err != nil {
 		return fmt.Errorf("sriov: cannot create cache dir %s: %v", CacheDir, err)
@@ -28,7 +28,7 @@ func SaveCachedConf(containerID, deviceID, ifName string, conf *NetConf) error {
 	return os.WriteFile(path, data, 0600)
 }
 
-// LoadCachedConf 读取缓存配置。
+// LoadCachedConf reads the cached config.
 func LoadCachedConf(containerID, deviceID, ifName string) (*NetConf, error) {
 	path, err := resolveCachePath(containerID, deviceID, ifName)
 	if err != nil {
@@ -48,15 +48,15 @@ func LoadCachedConf(containerID, deviceID, ifName string) (*NetConf, error) {
 	return conf, nil
 }
 
-// RemoveCachedConf 删除缓存。
+// RemoveCachedConf deletes the cache.
 func RemoveCachedConf(containerID, deviceID, ifName string) {
 	if path, err := resolveCachePath(containerID, deviceID, ifName); err == nil {
 		_ = os.Remove(path)
 	}
 }
 
-// resolveCachePath 在 deviceID 已知时直接拼路径；未知时（chained 模式的 DEL，
-// runtime 不会再给 deviceID）按 containerID 和 ifName 通配查找。
+// resolveCachePath joins the path directly when deviceID is known; when unknown (DEL in chained mode,
+// where the runtime no longer passes deviceID), it globs by containerID and ifName.
 func resolveCachePath(containerID, deviceID, ifName string) (string, error) {
 	if deviceID != "" {
 		return cachePath(containerID, deviceID, ifName), nil
@@ -73,7 +73,7 @@ func resolveCachePath(containerID, deviceID, ifName string) (string, error) {
 
 func cachePath(containerID, deviceID, ifName string) string {
 	name := fmt.Sprintf("%s-%s-%s.json", containerID, deviceID, ifName)
-	// 防止路径穿越
+	// Prevent path traversal
 	name = strings.ReplaceAll(name, string(os.PathSeparator), "_")
 	return filepath.Join(CacheDir, name)
 }

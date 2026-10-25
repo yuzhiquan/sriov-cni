@@ -1,11 +1,11 @@
-# 拥有两张网卡、两个 IP 的 Pod
+# A Pod with two NICs and two IPs
 #
-#   eth0 : 10.244.x.x   Calico 分配，overlay，承载集群内通信
-#   net1 : 192.168.100.10  SR-IOV VF 直通，whereabouts 分配，underlay
+#   eth0 : 10.244.x.x   assigned by Calico, overlay, carries in-cluster traffic
+#   net1 : 192.168.100.10  SR-IOV VF passthrough, assigned by whereabouts, underlay
 #
-# ★★ 三处名字必须完全一致 ★★
-#   1) 本文件 resources.limits  →  intel.com/intel_sriov_netdevice
-#   2) NAD 注解 resourceName    →  intel.com/intel_sriov_netdevice
+# ** The three names must match exactly **
+#   1) This file: resources.limits  ->  intel.com/intel_sriov_netdevice
+#   2) NAD annotation resourceName  ->  intel.com/intel_sriov_netdevice
 #   3) Device Plugin ConfigMap  →  resourcePrefix=intel.com + resourceName=intel_sriov_netdevice
 apiVersion: v1
 kind: Pod
@@ -13,11 +13,11 @@ metadata:
   name: test-sriov
   namespace: default
   annotations:
-    # 完整格式：JSON 数组，可指定接口名与 IP
+    # Full format: JSON array, can specify interface name and IP
     k8s.v1.cni.cncf.io/networks: |
       [{"name":"sriov-vlan1000","namespace":"default","interface":"net1"}]
 
-    # 简写格式（二选一即可）：
+    # Short format (use either one):
     # k8s.v1.cni.cncf.io/networks: default/sriov-vlan1000
 spec:
   containers:
@@ -30,7 +30,7 @@ spec:
       limits:
         intel.com/intel_sriov_netdevice: 1
 ---
-# 变体：固定 IP（用 static IPAM）
+# Variant: static IP (using static IPAM)
 apiVersion: v1
 kind: Pod
 metadata:

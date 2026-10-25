@@ -1,7 +1,7 @@
-# 固定 IP 的网络定义（配合 03-pod-dual-nic.yaml 的第二个 Pod）
+# Network definition with a fixed IP (pairs with the second Pod in 03-pod-dual-nic.yaml)
 #
-# static IPAM 适合：NFV 网元、数据库、必须固定地址的业务
-# 缺点：IP 冲突要自己保证，没有集群感知
+# static IPAM suits: NFV elements, databases, workloads that require a fixed address
+# Drawback: you must guarantee no IP conflicts yourself; no cluster awareness
 apiVersion: k8s.cni.cncf.io/v1
 kind: NetworkAttachmentDefinition
 metadata:

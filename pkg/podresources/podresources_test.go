@@ -23,7 +23,7 @@ func (f *fakeLister) List(context.Context, *podresourcesv1.ListPodResourcesReque
 
 func serve(t *testing.T, resp *podresourcesv1.ListPodResourcesResponse) string {
 	t.Helper()
-	// unix socket 路径有长度限制，不能用 t.TempDir() 的长路径
+	// unix socket paths have a length limit; don't use the long path from t.TempDir()
 	dir, err := os.MkdirTemp("/tmp", "pr")
 	if err != nil {
 		t.Fatal(err)

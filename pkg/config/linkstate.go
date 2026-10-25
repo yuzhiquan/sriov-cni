@@ -5,15 +5,15 @@ package config
 
 import "fmt"
 
-// VF 链路状态的取值，与 Linux 内核 include/uapi/linux/if_link.h 中
-// IFLA_VF_LINK_STATE_{AUTO,ENABLE,DISABLE} 一一对应。
+// VF link state values, which correspond one-to-one with
+// IFLA_VF_LINK_STATE_{AUTO,ENABLE,DISABLE} in the Linux kernel's include/uapi/linux/if_link.h.
 const (
 	LinkStateAuto    uint32 = 0
 	LinkStateEnable  uint32 = 1
 	LinkStateDisable uint32 = 2
 )
 
-// parseLinkState 把配置里的字符串解析成内核使用的数值。
+// parseLinkState parses the string from config into the numeric value used by the kernel.
 func parseLinkState(s string) (uint32, error) {
 	switch s {
 	case "auto":
@@ -26,12 +26,12 @@ func parseLinkState(s string) (uint32, error) {
 	return 0, fmt.Errorf("sriov: invalid link_state %q, expect auto|enable|disable", s)
 }
 
-// ParseLinkState 供其他包使用。
+// ParseLinkState is for use by other packages.
 func ParseLinkState(s string) (uint32, error) {
 	return parseLinkState(s)
 }
 
-// LinkStateString 把数值转回可读字符串（用于日志/缓存）。
+// LinkStateString converts the numeric value back to a readable string (for logs/cache).
 func LinkStateString(v uint32) string {
 	switch v {
 	case LinkStateAuto:
@@ -44,7 +44,7 @@ func LinkStateString(v uint32) string {
 	return "unknown"
 }
 
-// ParseOnOff 供其他包使用。
+// ParseOnOff is for use by other packages.
 func ParseOnOff(name, v string) (bool, error) {
 	return parseOnOff(name, v)
 }
