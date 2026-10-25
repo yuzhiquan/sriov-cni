@@ -1,68 +1,71 @@
-# sriov-cni · 从原理到手写 CNI，再到 Pod 第二块网卡
+# sriov-cni · From Principles to a Hand-Written CNI, to a Second NIC in Your Pod
+**English** | [简体中文](./zh-CN/README.md)
 
-一个**可编译、可运行、带单元测试**的最小 SR-IOV CNI 插件实现，配套完整的原理讲解与 K8s 落地手册。
+A minimal SR-IOV CNI plugin that **compiles, runs, and ships with unit tests**, accompanied by a complete explanation of the underlying principles and a hands-on guide to deploying it on K8s.
 
 ---
 
-## 目录
+## Table of Contents
 
-| 文档 | 内容 |
+| Document | Contents |
 |---|---|
-| **[01 · SR-IOV 原理](./docs/01-SRIOV原理.md)** | PF/VF、PCIe 配置空间、BAR、MSI-X、IOMMU 隔离、报文路径对比、三种模式、代价与选型 |
-| **[02 · 与 K8s CNI 结合](./docs/02-与K8s-CNI结合.md)** | 三大矛盾、四件套架构、完整时序、deviceID 注入机制、Device Plugin vs DRA、IPAM 选型 |
-| **[03 · 手写 SR-IOV CNI](./docs/03-编写SRIOV-CNI.md)** | 逐行讲解代码实现：sysfs 拓扑发现、netlink 硬件属性下发、netns 搬运、IPAM delegate、DEL 还原 |
-| **[04 · 实操：第二块网卡](./docs/04-实操-第二块网卡.md)** | 节点准备 → 集群组件 → NAD → Pod → 验证，**含默认路由冲突的三种解法** |
-| **[05 · 排错与优化](./docs/05-排错与优化.md)** | 故障对照表、诊断命令集、NUMA/中断/大页调优、生产清单 |
+| **[01 · SR-IOV Principles](./docs/01-sriov-principles.md)** | PF/VF, PCIe configuration space, BAR, MSI-X, IOMMU isolation, packet path comparison, three modes, costs and selection |
+| **[02 · Integrating with K8s CNI](./docs/02-integrating-with-k8s-cni.md)** | The three conflicts, the four-component architecture, full sequence, deviceID injection mechanism, Device Plugin vs DRA, IPAM selection |
+| **[03 · Writing an SR-IOV CNI](./docs/03-writing-a-sriov-cni.md)** | Line-by-line code walkthrough: sysfs topology discovery, applying hardware attributes via netlink, moving VFs into the netns, IPAM delegate, restoring the VF on DEL |
+| **[04 · Hands-on: A Second NIC](./docs/04-hands-on-second-nic.md)** | Node preparation → cluster components → NAD → Pod → verification, **including three solutions to the default route conflict** |
+| **[05 · Troubleshooting and Tuning](./docs/05-troubleshooting-and-tuning.md)** | Failure lookup table, diagnostic command set, NUMA/interrupt/hugepage tuning, production checklist |
+| **[06 · vs macvlan / ipvlan](./docs/06-vs-macvlan-ipvlan.md)** | SR-IOV vs macvlan vs ipvlan comparison |
+| **[07 · VF Isolation and Bandwidth](./docs/07-vf-isolation-and-bandwidth.md)** | Isolation between VFs and bandwidth partitioning |
 
-**代码**
+**Code**
 
 ```
-cmd/sriov/main.go     ADD / DEL / CHECK 主流程
-pkg/config/           配置解析、校验、状态缓存
-pkg/sriov/            ★ VF 拓扑发现 + 硬件属性下发 + netns 搬运
-pkg/ipam/             IPAM delegate + 地址/路由/策略路由下发
-pkg/ns/               netns 进出封装（锁线程）
+cmd/sriov/main.go     ADD / DEL / CHECK main flow
+pkg/config/           Config parsing, validation, state cache
+pkg/sriov/            ★ VF topology discovery + hardware attribute setup + netns move
+pkg/ipam/             IPAM delegate + address/route/policy-route setup
+pkg/ns/               netns enter/exit wrapper (thread locking)
 ```
 
 ---
 
-## 30 秒速答
+## 30-Second Answers
 
-**Q：SR-IOV 的原理？**
-一块物理网卡在 PCIe 层"分身"：PF 负责管理，VF 各自有独立 PCI 地址/BAR/队列/中断，可被直接交给容器或虚拟机的 netns，数据面绕开宿主机内核与虚拟交换机。隔离由 IOMMU 按 Requester ID(BDF) 做 DMA 重映射来保证。
+**Q: How does SR-IOV work?**
+A physical NIC "splits itself" at the PCIe layer: the PF handles management, while each VF has its own PCI address/BAR/queues/interrupts and can be handed directly to a container's or VM's netns, so the data plane bypasses the host kernel and virtual switch. Isolation is guaranteed by the IOMMU, which remaps DMA by Requester ID (BDF).
 
-**Q：怎么和 K8s CNI 结合？**
-四件套：**Device Plugin（或 DRA）** 负责"哪块 VF 归这个 Pod" → **Multus** 负责"一个 Pod 多张网卡"的编排 → **sriov-cni** 负责把 VF 刷好并搬进 netns → **IPAM** 负责分 IP。
+**Q: How does it integrate with K8s CNI?**
+Four components: **Device Plugin (or DRA)** decides "which VF belongs to this Pod" → **Multus** orchestrates "multiple NICs per Pod" → **sriov-cni** configures the VF and moves it into the netns → **IPAM** allocates the IP.
 
-**Q：Pod 里怎么有第二块网卡和第二个 IP？**
-NAD 定义第二网络 + Pod 注解 `k8s.v1.cni.cncf.io/networks` + `resources.limits` 声明 VF 资源。关键是**处理好默认路由冲突**（建议策略路由）。
+**Q: How does a Pod get a second NIC and a second IP?**
+A NAD defines the second network, the Pod annotation `k8s.v1.cni.cncf.io/networks` references it, and `resources.limits` declares the VF resource. The key is to **handle the default route conflict** (policy routing is recommended).
 
 ---
 
-## 构建
+## Build
 
 ```bash
-cd sriov-cni
+cd sriov-cni-guide
 ./build.sh
-# 或
+# or
 make all
 ```
 
-输出：`build/sriov`
+Output: `build/sriov`
 
 ```bash
-# 安装到节点
+# Install on the node
 sudo cp build/sriov /opt/cni/bin/sriov && sudo chmod +x /opt/cni/bin/sriov
 ```
 
-### 依赖
+### Dependencies
 
 ```bash
-go version        # 需要 1.21+
-export GOPROXY=https://goproxy.cn,direct   # 国内
+go version        # requires 1.21+
+export GOPROXY=https://goproxy.cn,direct   # for mainland China
 ```
 
-| 模块 | 版本 |
+| Module | Version |
 |---|---|
 | `github.com/containernetworking/cni` | v1.2.3 |
 | `github.com/vishvananda/netlink` | v1.2.1 |
@@ -71,25 +74,25 @@ export GOPROXY=https://goproxy.cn,direct   # 国内
 
 ---
 
-## 冒烟测试（无需集群）
+## Smoke Test (No Cluster Required)
 
 ```bash
-# 1. 检查硬件是否支持
+# 1. Check whether the hardware is supported
 sudo ./deploy/setup-vfs.sh --check
 
-# 2. 创建 VF 并持久化
+# 2. Create VFs and persist them
 sudo ./deploy/setup-vfs.sh --pf ens1f0 --numvfs 8
 
-# 3. 手动调用插件走一遍 ADD/DEL
+# 3. Invoke the plugin manually to walk through ADD/DEL
 sudo ./deploy/test-cni.sh
 ```
 
-### 无 SR-IOV 硬件时也能验证的部分
+### What You Can Still Verify Without SR-IOV Hardware
 
 ```bash
-go test ./...      # sysfs 拓扑解析逻辑（用假 sysfs 树）
+go test ./...      # sysfs topology parsing logic (using a fake sysfs tree)
 
-# 参数校验与错误提示
+# Parameter validation and error messages
 echo '{"cniVersion":"1.0.0","name":"n","type":"sriov","ipam":{}}' \
   | CNI_COMMAND=ADD CNI_CONTAINERID=abc CNI_NETNS=/proc/self/ns/net \
     CNI_IFNAME=net1 CNI_PATH=/opt/cni/bin ./build/sriov
@@ -99,7 +102,7 @@ echo '{"cniVersion":"1.0.0","name":"n","type":"sriov","ipam":{}}' \
 
 ---
 
-## 配置字段速查
+## Configuration Field Reference
 
 ```json
 {
@@ -137,63 +140,63 @@ echo '{"cniVersion":"1.0.0","name":"n","type":"sriov","ipam":{}}' \
 }
 ```
 
-| 字段 | 默认 | 说明 |
+| Field | Default | Description |
 |---|---|---|
-| `deviceID` | — | VF 的 PCI 地址，**生产由 Multus 注入** |
-| `vfID` | 自动推算 | VF 在 PF 下的序号 |
-| `pfName` | 自动推算 | PF 的 netdev 名 |
-| `mac` | 保留原值 | 需 `spoofchk: off` |
-| `vlan` | 不设置 | 1..4094，硬件打 tag |
-| `vlanQoS` | 0 | 802.1p 优先级 0..7 |
-| `spoofchk` | `on` | 防 MAC 欺骗 |
-| `trust` | `off` | 可信 VF |
+| `deviceID` | — | PCI address of the VF; **injected by Multus in production** |
+| `vfID` | Derived automatically | Index of the VF under its PF |
+| `pfName` | Derived automatically | netdev name of the PF |
+| `mac` | Keeps the original value | Requires `spoofchk: off` |
+| `vlan` | Not set | 1..4094, tag applied by hardware |
+| `vlanQoS` | 0 | 802.1p priority 0..7 |
+| `spoofchk` | `on` | MAC spoofing protection |
+| `trust` | `off` | Trusted VF |
 | `link_state` | `auto` | `auto`/`enable`/`disable` |
-| `min_tx_rate` / `max_tx_rate` | 0 | 限速 Mbps（依赖硬件） |
-| `mtu` | 继承 | — |
-| `dpdk` | `false` | true 时跳过 netns 搬运 |
-| `resetOnDel` | `true` | DEL 时是否还原 VF |
+| `min_tx_rate` / `max_tx_rate` | 0 | Rate limit in Mbps (hardware dependent) |
+| `mtu` | Inherited | — |
+| `dpdk` | `false` | When true, skips the netns move |
+| `resetOnDel` | `true` | Whether to restore the VF on DEL |
 
-`deviceID` 的三种来源（按优先级）：顶层 `deviceID` → `runtimeConfig.deviceID` → 环境变量 `PCIDEVICE_*`。
+The three sources of `deviceID` (by priority): top-level `deviceID` → `runtimeConfig.deviceID` → the `PCIDEVICE_*` environment variable.
 
 ---
 
-## 部署清单
+## Deployment Manifests
 
-| 文件 | 说明 |
+| File | Description |
 |---|---|
-| [`deploy/setup-vfs.sh`](./deploy/setup-vfs.sh) | 节点侧检查 + 创建/持久化 VF |
-| [`deploy/01-device-plugin-cm.yaml`](./deploy/01-device-plugin-cm.yaml) | SR-IOV Device Plugin 资源池定义 |
-| [`deploy/02-nad-sriov-vlan1000.yaml`](./deploy/02-nad-sriov-vlan1000.yaml) | NetworkAttachmentDefinition（whereabouts / 策略路由两个变体） |
-| [`deploy/03-pod-dual-nic.yaml`](./deploy/03-pod-dual-nic.yaml) | 双网卡 Pod 示例 |
-| [`deploy/04-nad-sriov-static-ip.yaml`](./deploy/04-nad-sriov-static-ip.yaml) | 固定 IP 的 NAD |
-| [`deploy/test-cni.sh`](./deploy/test-cni.sh) | 无集群的 ADD/DEL 冒烟测试 |
+| [`deploy/setup-vfs.sh`](./deploy/setup-vfs.sh) | Node-side checks + create/persist VFs |
+| [`deploy/01-device-plugin-cm.yaml`](./deploy/01-device-plugin-cm.yaml) | SR-IOV Device Plugin resource pool definition |
+| [`deploy/02-nad-sriov-vlan1000.yaml`](./deploy/02-nad-sriov-vlan1000.yaml) | NetworkAttachmentDefinition (whereabouts / policy-routing variants) |
+| [`deploy/03-pod-dual-nic.yaml`](./deploy/03-pod-dual-nic.yaml) | Dual-NIC Pod example |
+| [`deploy/04-nad-sriov-static-ip.yaml`](./deploy/04-nad-sriov-static-ip.yaml) | NAD with a static IP |
+| [`deploy/test-cni.sh`](./deploy/test-cni.sh) | ADD/DEL smoke test without a cluster |
 
 ---
 
-## 适用范围
+## Scope
 
-| 场景 | 建议 |
+| Scenario | Recommendation |
 |---|---|
-| 学习与二次开发 | ✅ 本仓库 |
-| 生产部署 | 用上游 [`sriov-cni`](https://github.com/k8snetworkplumbingwg/sriov-cni) + [`multus-cni`](https://github.com/k8snetworkplumbingwg/multus-cni) |
-| 全自动运维 | 用 [`sriov-network-operator`](https://github.com/k8snetworkplumbingwg/sriov-network-operator)（含 VF 创建、驱动绑定、NAD 生成） |
-| 新集群 + 精细调度 | 关注 DRA（k8s 1.35 起 GA）+ [`dra-driver-sriov`](https://github.com/k8snetworkplumbingwg/dra-driver-sriov) |
+| Learning and further development | ✅ This repository |
+| Production deployment | Use upstream [`sriov-cni`](https://github.com/k8snetworkplumbingwg/sriov-cni) + [`multus-cni`](https://github.com/k8snetworkplumbingwg/multus-cni) |
+| Fully automated operations | Use [`sriov-network-operator`](https://github.com/k8snetworkplumbingwg/sriov-network-operator) (includes VF creation, driver binding, NAD generation) |
+| New clusters + fine-grained scheduling | Watch DRA (GA since k8s 1.35) + [`dra-driver-sriov`](https://github.com/k8snetworkplumbingwg/dra-driver-sriov) |
 
 ---
 
-## 验证状态
+## Verification Status
 
 ```
-$ gofmt -l .                     无输出
+$ gofmt -l .                     no output
 $ go vet ./...                   clean
-$ go build ./...                 OK  (静态链接 ELF，CGO_ENABLED=0)
+$ go build ./...                 OK  (statically linked ELF, CGO_ENABLED=0)
 $ go test ./...
-    ok  github.com/example/sriov-cni/pkg/sriov    # sysfs 拓扑解析（假 sysfs 树）
-    ok  github.com/example/sriov-cni/pkg/ns       # netns 进出与还原（需 root）
+    ok  github.com/example/sriov-cni/pkg/sriov    # sysfs topology parsing (fake sysfs tree)
+    ok  github.com/example/sriov-cni/pkg/ns       # netns enter/exit and restore (requires root)
 $ CNI_COMMAND=VERSION ./build/sriov
     {"cniVersion":"1.1.0","supportedVersions":["0.1.0","0.2.0","0.3.0","0.3.1","0.4.0","1.0.0","1.1.0"]}
-$ ./deploy/setup-vfs.sh --check       # 在无 SR-IOV 硬件时正确报错退出
+$ ./deploy/setup-vfs.sh --check       # correctly errors out and exits when no SR-IOV hardware is present
 ```
 
-> 需要**真实 SR-IOV 网卡**（Intel E810/X710、Mellanox ConnectX 等）才能跑完整的 ADD/DEL 端到端；
-> 通用虚拟机 / 大多数云主机没有这个能力。
+> A **real SR-IOV NIC** (Intel E810/X710, Mellanox ConnectX, etc.) is required to run the full end-to-end ADD/DEL;
+> generic VMs / most cloud instances do not have this capability.

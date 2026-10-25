@@ -247,8 +247,8 @@ echo 8 > /sys/class/net/ens1f0/device/sriov_numvfs   # 并做持久化
 | whereabouts | `kubectl apply -f https://raw.githubusercontent.com/k8snetworkplumbingwg/whereabouts/master/doc/crds/...`（按官方文档） |
 
 **③ 业务层**
-- NetworkAttachmentDefinition（[deploy/02-nad-sriov-vlan1000.yaml](../deploy/02-nad-sriov-vlan1000.yaml)）
-- Pod 注解 + resources.limits（[deploy/03-pod-dual-nic.yaml](../deploy/03-pod-dual-nic.yaml)）
+- NetworkAttachmentDefinition（[deploy/02-nad-sriov-vlan1000.yaml](../../deploy/02-nad-sriov-vlan1000.yaml)）
+- Pod 注解 + resources.limits（[deploy/03-pod-dual-nic.yaml](../../deploy/03-pod-dual-nic.yaml)）
 
 > 生产环境更推荐直接用 **`sriov-network-operator`**，它把上面 ②③④ 全自动化了（含 VF 创建、驱动绑定、device plugin 配置、NAD 生成）。
 

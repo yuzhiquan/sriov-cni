@@ -1,6 +1,6 @@
-# SR-IOV CNI 指南 · 概览与索引
-
 # sriov-cni · 从原理到手写 CNI，再到 Pod 第二块网卡
+
+[English](../README.md) | **简体中文**
 
 一个**可编译、可运行、带单元测试**的最小 SR-IOV CNI 插件实现，配套完整的原理讲解与 K8s 落地手册。
 
@@ -9,14 +9,12 @@
 ## 目录
 
 | 文档 | 内容 |
-| --- | --- |
-| [01 · SR-IOV 原理](./docs/01-SRIOV原理.md) | PF/VF、PCIe 配置空间、BAR、MSI-X、IOMMU 隔离、报文路径对比、三种模式、代价与选型 |
-| [02 · 与 K8s CNI 结合](./docs/02-与K8s-CNI结合.md) | 三大矛盾、四件套架构、完整时序、deviceID 注入机制、Device Plugin vs DRA、IPAM 选型 |
-| [03 · 手写 SR-IOV CNI](./docs/03-编写SRIOV-CNI.md) | 逐行讲解代码实现：sysfs 拓扑发现、netlink 硬件属性下发、netns 搬运、IPAM delegate、DEL 还原 |
-| [04 · 实操：第二块网卡](./docs/04-实操-第二块网卡.md) | 节点准备 → 集群组件 → NAD → Pod → 验证，**含默认路由冲突的三种解法** |
-| [05 · 排错与优化](./docs/05-排错与优化.md) | 故障对照表、诊断命令集、NUMA/中断/大页调优、生产清单 |
-| [06 · 与 macvlan/ipvlan 对比](./docs/06-与macvlan-ipvlan对比.md) | 数据面路径对比、MAC 处理方式、云环境兼容性、选型决策树 |
-| [07 · VF 间隔离与带宽](./docs/07-VF间隔离与带宽.md) | 大流量下 VF 是否互相影响、带宽是否被切分、TX/RX 限速能力、厂商对比 |
+|---|---|
+| **[01 · SR-IOV 原理](./docs/01-SRIOV原理.md)** | PF/VF、PCIe 配置空间、BAR、MSI-X、IOMMU 隔离、报文路径对比、三种模式、代价与选型 |
+| **[02 · 与 K8s CNI 结合](./docs/02-与K8s-CNI结合.md)** | 三大矛盾、四件套架构、完整时序、deviceID 注入机制、Device Plugin vs DRA、IPAM 选型 |
+| **[03 · 手写 SR-IOV CNI](./docs/03-编写SRIOV-CNI.md)** | 逐行讲解代码实现：sysfs 拓扑发现、netlink 硬件属性下发、netns 搬运、IPAM delegate、DEL 还原 |
+| **[04 · 实操：第二块网卡](./docs/04-实操-第二块网卡.md)** | 节点准备 → 集群组件 → NAD → Pod → 验证，**含默认路由冲突的三种解法** |
+| **[05 · 排错与优化](./docs/05-排错与优化.md)** | 故障对照表、诊断命令集、NUMA/中断/大页调优、生产清单 |
 
 **代码**
 
@@ -67,7 +65,7 @@ export GOPROXY=https://goproxy.cn,direct   # 国内
 ```
 
 | 模块 | 版本 |
-| --- | --- |
+|---|---|
 | `github.com/containernetworking/cni` | v1.2.3 |
 | `github.com/vishvananda/netlink` | v1.2.1 |
 | `github.com/vishvananda/netns` | v0.0.4 |
@@ -142,7 +140,7 @@ echo '{"cniVersion":"1.0.0","name":"n","type":"sriov","ipam":{}}' \
 ```
 
 | 字段 | 默认 | 说明 |
-| --- | --- | --- |
+|---|---|---|
 | `deviceID` | — | VF 的 PCI 地址，**生产由 Multus 注入** |
 | `vfID` | 自动推算 | VF 在 PF 下的序号 |
 | `pfName` | 自动推算 | PF 的 netdev 名 |
@@ -164,24 +162,24 @@ echo '{"cniVersion":"1.0.0","name":"n","type":"sriov","ipam":{}}' \
 ## 部署清单
 
 | 文件 | 说明 |
-| --- | --- |
-| [deploy/setup-vfs.sh](./deploy/setup-vfs.sh) | 节点侧检查 + 创建/持久化 VF |
-| [deploy/01-device-plugin-cm.yaml](./deploy/01-device-plugin-cm.yaml) | SR-IOV Device Plugin 资源池定义 |
-| [deploy/02-nad-sriov-vlan1000.yaml](./deploy/02-nad-sriov-vlan1000.yaml) | NetworkAttachmentDefinition（whereabouts / 策略路由两个变体） |
-| [deploy/03-pod-dual-nic.yaml](./deploy/03-pod-dual-nic.yaml) | 双网卡 Pod 示例 |
-| [deploy/04-nad-sriov-static-ip.yaml](./deploy/04-nad-sriov-static-ip.yaml) | 固定 IP 的 NAD |
-| [deploy/test-cni.sh](./deploy/test-cni.sh) | 无集群的 ADD/DEL 冒烟测试 |
+|---|---|
+| [`deploy/setup-vfs.sh`](../deploy/setup-vfs.sh) | 节点侧检查 + 创建/持久化 VF |
+| [`deploy/01-device-plugin-cm.yaml`](../deploy/01-device-plugin-cm.yaml) | SR-IOV Device Plugin 资源池定义 |
+| [`deploy/02-nad-sriov-vlan1000.yaml`](../deploy/02-nad-sriov-vlan1000.yaml) | NetworkAttachmentDefinition（whereabouts / 策略路由两个变体） |
+| [`deploy/03-pod-dual-nic.yaml`](../deploy/03-pod-dual-nic.yaml) | 双网卡 Pod 示例 |
+| [`deploy/04-nad-sriov-static-ip.yaml`](../deploy/04-nad-sriov-static-ip.yaml) | 固定 IP 的 NAD |
+| [`deploy/test-cni.sh`](../deploy/test-cni.sh) | 无集群的 ADD/DEL 冒烟测试 |
 
 ---
 
 ## 适用范围
 
 | 场景 | 建议 |
-| --- | --- |
+|---|---|
 | 学习与二次开发 | ✅ 本仓库 |
-| 生产部署 | 用上游 [sriov-cni](https://github.com/k8snetworkplumbingwg/sriov-cni) + [multus-cni](https://github.com/k8snetworkplumbingwg/multus-cni) |
-| 全自动运维 | 用 [sriov-network-operator](https://github.com/k8snetworkplumbingwg/sriov-network-operator)（含 VF 创建、驱动绑定、NAD 生成） |
-| 新集群 + 精细调度 | 关注 DRA（k8s 1.35 起 GA）+ [dra-driver-sriov](https://github.com/k8snetworkplumbingwg/dra-driver-sriov) |
+| 生产部署 | 用上游 [`sriov-cni`](https://github.com/k8snetworkplumbingwg/sriov-cni) + [`multus-cni`](https://github.com/k8snetworkplumbingwg/multus-cni) |
+| 全自动运维 | 用 [`sriov-network-operator`](https://github.com/k8snetworkplumbingwg/sriov-network-operator)（含 VF 创建、驱动绑定、NAD 生成） |
+| 新集群 + 精细调度 | 关注 DRA（k8s 1.35 起 GA）+ [`dra-driver-sriov`](https://github.com/k8snetworkplumbingwg/dra-driver-sriov) |
 
 ---
 
